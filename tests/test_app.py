@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -87,11 +88,55 @@ class GameTest(unittest.TestCase):
             self.request(base + '/answer', {'index': index, 'answer': answer}, player['token'], admin=False)
             self.request(base + '/answer', {'index': index, 'answer': answer}, player['token'], status=400)
             state = self.request(base, token=player['token'], admin=False)
+            self.assertEqual(state['phase'], 'question')
+            self.assertNotIn('correct', state)
+            self.request(base + '/next', {}, host['token'], status=400)
+            with app.LOCK:
+                app.GAMES[host['code']]['deadline'] = 0
+            state = self.request(base, token=player['token'], admin=False)
             self.assertEqual(state['phase'], 'results')
             self.assertTrue(state['correct'])
         result = self.request(base + '/next', {}, host['token'])
         self.assertEqual(result['phase'], 'finished')
         self.assertGreater(result['players'][0]['score'], 3500)
+
+    def test_shared_timer_and_speed_scoring(self):
+        q = self.request('/api/quizzes', dict(title='Shared clock', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)
+        h = self.request('/api/games', {'quiz_id': q['id']}, status=201)
+        base = '/api/games/' + h['code']
+        players = [self.request(base + '/join', {'name': name}, admin=False) for name in ('Fast', 'Slow', 'Wrong', 'Missed')]
+        self.request(base + '/next', {}, h['token'])
+        start = app.GAMES[h['code']]['started']
+        with patch('app.time.time', return_value=start + 2):
+            first = self.request(base, token=players[0]['token'], admin=False)
+            second = self.request(base, token=players[1]['token'], admin=False)
+            self.assertEqual(first['index'], second['index'])
+            self.assertEqual(first['remaining'], second['remaining'])
+            self.assertEqual(first['question'], second['question'])
+            self.request(base + '/answer', {'index': 0, 'answer': [0]}, players[0]['token'], admin=False)
+        with patch('app.time.time', return_value=start + 10):
+            self.request(base + '/answer', {'index': 0, 'answer': [0]}, players[1]['token'], admin=False)
+            self.request(base + '/answer', {'index': 0, 'answer': [1]}, players[2]['token'], admin=False)
+            hidden = self.request(base, token=players[0]['token'], admin=False)
+            self.assertEqual(hidden['phase'], 'question')
+            self.assertTrue(all(p['score'] == 0 for p in hidden['players']))
+            self.assertNotIn('answers', hidden['question'])
+        with patch('app.time.time', return_value=start + 20):
+            self.request(base + '/answer', {'index': 0, 'answer': [0]}, players[3]['token'], admin=False, status=400)
+            fast = self.request(base, token=players[0]['token'], admin=False)
+            slow = self.request(base, token=players[1]['token'], admin=False)
+            wrong = self.request(base, token=players[2]['token'], admin=False)
+            missed = self.request(base, token=players[3]['token'], admin=False)
+            self.assertEqual(fast['phase'], 'results')
+            self.assertEqual(fast['points'], 950)
+            self.assertEqual(slow['points'], 750)
+            self.assertEqual(fast['response_seconds'], 2)
+            self.assertEqual(slow['response_seconds'], 10)
+            self.assertEqual(wrong['points'], 0)
+            self.assertEqual(missed['points'], 0)
+            self.assertIsNone(missed['response_seconds'])
+            self.assertEqual(fast['players'][0], {'name': 'Fast', 'score': 950})
+            self.assertEqual(self.request(base, token=h['token'])['players'], fast['players'])
 
     def test_timeout_and_invalid_quiz(self):
         self.request('/api/quizzes', {'title': '', 'questions': []}, status=400)

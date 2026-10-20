@@ -9,7 +9,15 @@ function nav() {
   document.querySelector('.local').innerHTML = adminView ? '<a href="/play">PLAYER VIEW ↗</a>' : '<a href="/admin">ADMIN SIGN IN ↗</a>';
 }
 nav();
-let poll, draft, selected = [], lastKey = '', current;
+let poll, draft, selected = [], lastKey = '', current, timerEnd = 0;
+function updateTimer() {
+  const timer = document.querySelector('#timer');
+  if(!timer) return;
+  const remaining = Math.max(0, (timerEnd - performance.now()) / 1000);
+  timer.textContent = `${Math.ceil(remaining)}s`;
+  document.querySelectorAll('#answer input, #answer button').forEach(el => el.disabled = remaining <= 0);
+}
+setInterval(updateTimer, 100);
 function notice(message) { const n = document.querySelector('#notice'); n.textContent = message; n.hidden = false; setTimeout(() => n.hidden = true, 5000); }
 async function api(path, data) {
   const response = await fetch('/api/' + path, {method: data === undefined ? 'GET' : 'POST', headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
@@ -67,22 +75,24 @@ async function play() {
   clearTimeout(poll);
   if(!session) return;
   try {
+    const requestStarted = performance.now();
     current = await api(`games/${session.code}`);
+    timerEnd = performance.now() + Math.max(0, (current.remaining || 0) * 1000 - (performance.now() - requestStarted) / 2);
     const g = current;
     const key = `${g.phase}-${g.index}-${g.submitted}`;
     if(key!==lastKey) { lastKey=key; selected=[]; renderGame(g); }
-    const timer=document.querySelector('#timer'); if(timer) timer.textContent=`${Math.ceil(g.remaining)}s`;
+    updateTimer();
     const count=document.querySelector('#count'); if(count) count.textContent=`${g.answered} / ${g.players.length} answered`;
     const people=document.querySelector('#people'); if(people) people.innerHTML=g.players.map(p=>`<span class="chip">${esc(p.name)}</span>`).join('') || '<p>Waiting for your first player…</p>';
-    poll=setTimeout(play,800);
+    poll=setTimeout(play,300);
   } catch(e) { notice(e.message); app.innerHTML='<div class="card center"><h2>Game unavailable</h2><p>The server may have restarted. Return home and start or join a new game.</p><button id="exit">Return home</button></div>'; document.querySelector('#exit').onclick=leave; }
 }
 function ranking(g) { return `<div class="card">${g.players.map((p,i)=>`<div class="score"><span>${i+1}. ${esc(p.name)}</span><strong>${p.score} pts</strong></div>`).join('')||'<p>No players joined.</p>'}</div>`; }
 function renderGame(g) {
   let body='';
   if(g.phase==='lobby') body=`<span class="eyebrow">${esc(g.title)}</span><h1 style="margin-left:auto;margin-right:auto">The room is yours.</h1><p>Join on the same server address and enter this code:</p><div class="code">${g.code}</div><div class="players" id="people"></div>${g.host?'<button id="next">Start game →</button>':'<p>Get comfortable. Your host will start the game shortly.</p>'}`;
-  if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><button id="next">Reveal answers</button>`:g.submitted?'<div class="card"><h2>Answer locked in ✓</h2><p>Let’s see how everyone did…</p></div>':`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
-  if(g.phase==='results') { const q=g.question; const correct=q.type==='text'?q.answers.join(' / '):q.answers.map(i=>q.options[i]).join(', '); body=`<span class="eyebrow">QUESTION ${g.index+1} · RESULTS</span><h2>${esc(q.text)}</h2><div class="card"><span class="eyebrow">CORRECT ANSWER${q.answers.length>1?'S':''}</span><h2>${esc(correct)}</h2>${g.host?'':`<p>${g.correct?'You got it! Nicely done.':'Keep going. The next question is a fresh start.'}</p>`}</div><h2>Leaderboard</h2>${ranking(g)}${g.host?`<button style="margin-top:25px" id="next">${g.index+1===g.total?'Finish game':'Next question'} →</button>`:'<p>Waiting for your host…</p>'}`; }
+  if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p><p class="muted">Correct answers earn 500 points + up to 500 for speed. Incorrect or missed answers earn 0.</p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><p>Everyone has the same timer. Results appear when time is up.</p>`:g.submitted?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><div class="card"><h2>Answer locked in ✓</h2><p>Waiting for the shared timer to finish…</p></div>`:`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
+  if(g.phase==='results') { const q=g.question; const correct=q.type==='text'?q.answers.join(' / '):q.answers.map(i=>q.options[i]).join(', '); body=`<span class="eyebrow">QUESTION ${g.index+1} · RESULTS</span><h2>${esc(q.text)}</h2><div class="card"><span class="eyebrow">CORRECT ANSWER${q.answers.length>1?'S':''}</span><h2>${esc(correct)}</h2>${g.host?'':`<p>${g.correct?'Correct!':'Incorrect or no answer.'} <strong>+${g.points} points</strong>${g.response_seconds == null ? '' : ` · Answered in ${g.response_seconds.toFixed(2)}s`}</p>`}</div><h2>Leaderboard</h2>${ranking(g)}${g.host?`<button style="margin-top:25px" id="next">${g.index+1===g.total?'Finish game':'Next question'} →</button>`:'<p>Waiting for your host…</p>'}`; }
   if(g.phase==='finished') body=`<span class="eyebrow">THAT’S A WRAP</span><h1 style="margin-left:auto;margin-right:auto">${g.players.length?esc(g.players[0].name)+' wins!':'Thanks for playing!'}</h1><p>Good company makes every answer count.</p>${ranking(g)}<button style="margin-top:25px" id="done">${adminView?'Back to collection':'Join another game'}</button>`;
   app.innerHTML=`<section class="game center"><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><button class="ghost" id="exit">Leave game</button></div>${body}</section>`;
   document.querySelector('#exit').onclick=()=>{if(confirm('Leave this game?')) leave();};

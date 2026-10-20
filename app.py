@@ -83,6 +83,8 @@ def question(game):
 def expire(game):
     if game['phase'] == 'question' and time.time() >= game['deadline']:
         game['phase'] = 'results'
+        for token, submission in game['submissions'].items():
+            game['players'][token]['score'] += submission['points']
 
 
 def state(game, token):
@@ -98,10 +100,14 @@ def state(game, token):
         q = question(game)
         result.update(question={k: q[k] for k in ('type', 'text', 'options')},
                       remaining=max(0, game['deadline'] - time.time()),
+                      duration=q['seconds'],
                       answered=len(game['submissions']), submitted=token in game['submissions'])
         if game['phase'] == 'results':
             result['question']['answers'] = q['answers']
-            result['correct'] = game['submissions'].get(token, {}).get('correct', False)
+            submission = game['submissions'].get(token, {})
+            result.update(correct=submission.get('correct', False),
+                          points=submission.get('points', 0),
+                          response_seconds=submission.get('response_seconds'))
     return result
 
 
@@ -214,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not secrets.compare_digest(token, game['host']):
                         return self.reply({'error': 'Host access required.'}, 403)
                     if game['phase'] == 'question':
-                        game['phase'] = 'results'
+                        raise ValueError('Wait for the shared question timer to finish.')
                     elif game['phase'] in ('lobby', 'results'):
                         game['index'] += 1
                         game['submissions'] = {}
@@ -238,11 +244,9 @@ class Handler(BaseHTTPRequestHandler):
                         if not isinstance(answer, list) or any(type(x) is not int for x in answer):
                             raise ValueError('Select an answer.')
                         correct = sorted(set(answer)) == q['answers']
-                    points = round(500 + 500 * max(0, (game['deadline'] - time.time()) / q['seconds'])) if correct else 0
-                    game['players'][token]['score'] += points
-                    game['submissions'][token] = dict(correct=correct, points=points)
-                    if len(game['submissions']) == len(game['players']):
-                        game['phase'] = 'results'
+                    elapsed = max(0, time.time() - game['started'])
+                    points = round(500 + 500 * max(0, 1 - elapsed / q['seconds'])) if correct else 0
+                    game['submissions'][token] = dict(correct=correct, points=points, response_seconds=round(elapsed, 2))
                     return self.reply({'accepted': True})
                 return self.reply({'error': 'Not found'}, 404)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:

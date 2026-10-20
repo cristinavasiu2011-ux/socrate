@@ -30,8 +30,9 @@ Players open `http://YOUR-COMPUTER-LAN-IP:8075/play`. Admins use `/admin`. Allow
 - Per-question timers from 5–120 seconds; accepted text alternatives ignore case and surrounding spaces.
 - Local quiz collection, with duplicate-and-edit for creating variations.
 - Game lobby, unique nicknames, timed answers, answer reveal, and final leaderboard.
-- Correct answers earn 500–1,000 points depending on speed. Multiple-answer questions require the exact set.
-- Host controls question progression; all answers or the timer ending reveal results automatically.
+- Correct answers earn `round(500 + 500 × (1 − response time / question duration))` points (500–1,000); incorrect and missed answers earn zero. Response time is measured when the server receives the answer. Multiple-answer questions require the exact set.
+- The host starts each question for everyone together. A shared server timer closes answers and reveals results when time runs out, even if everyone answered early. The host then starts the next question.
+- A smooth countdown follows the server timer; each device refreshes game state every 300 ms. Results show each player’s response time and points. Scores stay hidden until the timer ends.
 
 Quizzes persist in `data/quizzes.db`. Back up that file to keep your collection. Set `SOCRATE_DB` to use another file. Live games and scores are kept in memory and reset when the server restarts. Refreshing a tab reconnects using its stored session.
 
@@ -43,7 +44,7 @@ This is a trusted local-network app. Quiz management and answer keys require adm
 python -m unittest discover -s tests -v
 ```
 
-Integration tests use a temporary database and exercise a complete four-question game, scoring, access control, duplicate answers, invalid quizzes, timeouts, admin sign-in/sign-out, and blocked player access to quiz management.
+Integration tests use a temporary database and exercise a complete four-question game, scoring, access control, duplicate answers, invalid quizzes, timeouts, admin sign-in/sign-out, blocked player access to quiz management, synchronized timers, and speed-based scoring.
 
 ## Try the Universe sample quiz
 

@@ -10,15 +10,15 @@ Requires Python 3.10 or newer. From this folder:
 python app.py
 ```
 
-Open **http://localhost:8000** in your browser. Create a quiz, then click **Host game**. Players enter the six-digit code and a nickname. Use separate browsers or devices for the host and players; a tab stores its own game session.
+Open **http://localhost:8075** in your browser. Create a quiz, then click **Host game**. Players enter the six-digit code and a nickname. Use separate browsers or devices for the host and players; a tab stores its own game session.
 
 For other devices on your Wi-Fi:
 
 ```sh
-python app.py --host 0.0.0.0 --port 8000
+python app.py --host 0.0.0.0 --port 8075
 ```
 
-Players open `http://YOUR-COMPUTER-LAN-IP:8000`. Allow inbound TCP port 8000 in your computer's firewall if necessary. Internet access is unnecessary. Stop the server with Ctrl+C.
+Players open `http://YOUR-COMPUTER-LAN-IP:8075`. Allow inbound TCP port 8075 in your computer's firewall if necessary. Internet access is unnecessary. Stop the server with Ctrl+C.
 
 ## Features
 

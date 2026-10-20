@@ -16,6 +16,9 @@ class GameTest(unittest.TestCase):
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
         app.DB = Path(cls.temp.name) / 'test.db'
+        app.ADMIN_KEY = 'test-admin-key'
+        cls.admin_token = 'test-admin-session'
+        app.ADMIN_SESSIONS[cls.admin_token] = app.time.time() + 3600
         cls.server = ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -25,16 +28,39 @@ class GameTest(unittest.TestCase):
         cls.server.server_close()
         cls.temp.cleanup()
 
-    def request(self, path, data=None, token='', status=200):
+    def request(self, path, data=None, token='', status=200, admin=True):
         conn = http.client.HTTPConnection(*self.server.server_address)
         conn.request('GET' if data is None else 'POST', path,
                      None if data is None else json.dumps(data),
-                     {'Authorization': token, 'Content-Type': 'application/json'})
+                     {'Authorization': token, 'Content-Type': 'application/json',
+                      'X-Admin-Token': self.admin_token if admin else ''})
         response = conn.getresponse()
         raw = response.read()
         self.assertEqual(response.status, status, raw)
         conn.close()
         return json.loads(raw)
+
+    def test_admin_boundaries(self):
+        self.request('/api/quizzes', admin=False, status=403)
+        self.request('/api/quizzes', {'title': 'Unauthorized'}, admin=False, status=403)
+        self.request('/api/games', {'quiz_id': 'anything'}, admin=False, status=403)
+        self.request('/api/admin/login', {'key': 'wrong'}, admin=False, status=403)
+        login = self.request('/api/admin/login', {'key': 'test-admin-key'}, admin=False)
+        conn = http.client.HTTPConnection(*self.server.server_address)
+        headers = {'X-Admin-Token': login['token'], 'Content-Type': 'application/json'}
+        conn.request('GET', '/api/quizzes', headers=headers)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        response.read()
+        conn.request('POST', '/api/admin/logout', '{}', headers)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        response.read()
+        conn.request('GET', '/api/quizzes', headers=headers)
+        response = conn.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
+        conn.close()
 
     def test_complete_game_all_question_types(self):
         questions = [
@@ -47,17 +73,20 @@ class GameTest(unittest.TestCase):
         self.assertTrue(any(q['id'] == quiz['id'] for q in self.request('/api/quizzes')))
         host = self.request('/api/games', {'quiz_id': quiz['id']}, status=201)
         base = '/api/games/' + host['code']
-        player = self.request(base + '/join', {'name': 'Ada'})
+        player = self.request(base + '/join', {'name': 'Ada'}, admin=False)
+        self.request('/api/quizzes', token=player['token'], admin=False, status=403)
+        self.request('/api/quizzes', {'title': 'Player edit'}, token=player['token'], admin=False, status=403)
+        self.request('/api/games', {'quiz_id': quiz['id']}, token=player['token'], admin=False, status=403)
         self.request(base + '/join', {'name': 'ada'}, status=400)
         self.request(base + '/next', {}, player['token'], status=403)
         for index, answer in enumerate([[0], [0, 2], [0], '  PARIS  ']):
             self.request(base + '/next', {}, host['token'])
-            state = self.request(base, token=player['token'])
+            state = self.request(base, token=player['token'], admin=False)
             self.assertNotIn('answers', state['question'])
             self.request(base + '/answer', {'index': index - 1, 'answer': answer}, player['token'], status=400)
-            self.request(base + '/answer', {'index': index, 'answer': answer}, player['token'])
+            self.request(base + '/answer', {'index': index, 'answer': answer}, player['token'], admin=False)
             self.request(base + '/answer', {'index': index, 'answer': answer}, player['token'], status=400)
-            state = self.request(base, token=player['token'])
+            state = self.request(base, token=player['token'], admin=False)
             self.assertEqual(state['phase'], 'results')
             self.assertTrue(state['correct'])
         result = self.request(base + '/next', {}, host['token'])

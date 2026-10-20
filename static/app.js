@@ -1,20 +1,43 @@
 const app = document.querySelector('#app');
 const esc = x => String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let session = JSON.parse(sessionStorage.getItem('socrate-session') || 'null');
+const adminView = location.pathname === '/admin';
+const sessionKey = adminView ? 'socrate-host-session' : 'socrate-player-session';
+let adminToken = sessionStorage.getItem('socrate-admin-token') || '';
+let session = JSON.parse(sessionStorage.getItem(sessionKey) || 'null');
+function nav() {
+  document.querySelector('.brand').href = adminView ? '/admin' : '/play';
+  document.querySelector('.local').innerHTML = adminView ? '<a href="/play">PLAYER VIEW ↗</a>' : '<a href="/admin">ADMIN SIGN IN ↗</a>';
+}
+nav();
 let poll, draft, selected = [], lastKey = '', current;
 function notice(message) { const n = document.querySelector('#notice'); n.textContent = message; n.hidden = false; setTimeout(() => n.hidden = true, 5000); }
 async function api(path, data) {
-  const response = await fetch('/api/' + path, {method: data === undefined ? 'GET' : 'POST', headers: {'Content-Type':'application/json', 'Authorization':session?.token || ''}, body:data === undefined ? undefined : JSON.stringify(data)});
+  const response = await fetch('/api/' + path, {method: data === undefined ? 'GET' : 'POST', headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
   const result = await response.json(); if (!response.ok) throw Error(result.error || 'Request failed'); return result;
 }
 function run(fn) { return async event => { try { await fn(event); } catch(e) { notice(e.message); } }; }
-function remember(s) { session = s; sessionStorage.setItem('socrate-session', JSON.stringify(s)); lastKey = ''; play(); }
-function leave() { clearTimeout(poll); session = null; sessionStorage.removeItem('socrate-session'); home(); }
+function remember(s) { session = s; sessionStorage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
+function leave() { clearTimeout(poll); session = null; sessionStorage.removeItem(sessionKey); home(); }
+function joinForm() {
+  return `<form class="card join" id="join"><span class="eyebrow">PLAYER VIEW</span><h2>Join the fun.</h2><p>Your host has a game code. You bring the answers.</p><label for="code">Game code</label><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><label for="name">Your nickname</label><input id="name" maxlength="30" placeholder="Curious mind" required><button>Join game →</button><p class="muted center">Connect to the same Wi-Fi as your host.</p></form>`;
+}
+function login() {
+  app.innerHTML = `<div class="editor"><span class="eyebrow">ADMIN VIEW</span><h1 style="font-size:48px">Your quiz studio.</h1><form class="card" id="login"><h2>Admin sign in</h2><p>Enter the admin access key shown in the server terminal. Players don’t need this key.</p><label for="key">Admin access key</label><input id="key" type="password" autocomplete="current-password" required><button style="margin-top:20px">Sign in →</button></form><p><a href="/play">Go to player view</a></p></div>`;
+  document.querySelector('#login').onsubmit = run(async e => { e.preventDefault(); const result = await api('admin/login', {key:document.querySelector('#key').value}); adminToken = result.token; sessionStorage.setItem('socrate-admin-token', adminToken); await home(); });
+}
 async function home() {
   clearTimeout(poll);
-  app.innerHTML = `<section class="hero"><div><span class="eyebrow">A LITTLE CURIOSITY GOES A LONG WAY</span><h1>Good questions.<br>Great company.</h1><p>Turn what you know into a game everyone wants to play. Create a quiz, gather your people, and let curiosity win.</p><button id="create">＋ Create a quiz</button><p class="muted">No accounts. No downloads. Just play.</p></div><form class="card join" id="join"><span class="eyebrow">YOU’RE INVITED</span><h2>Join the fun.</h2><p>Your host has a game code. You bring the answers.</p><label for="code">Game code</label><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><label for="name">Your nickname</label><input id="name" maxlength="30" placeholder="Curious mind" required><button>Join game →</button><p class="muted center">On another device? Connect to the same Wi-Fi.</p></form></section><div class="section-title"><div><span class="eyebrow">READY WHEN YOU ARE</span><h2>Your quiz collection</h2></div><span class="muted">Saved on this computer</span></div><section class="grid" id="quizzes">Loading your quizzes…</section>`;
+  if(!adminView) {
+    app.innerHTML = `<section class="hero"><div><span class="eyebrow">A LITTLE CURIOSITY GOES A LONG WAY</span><h1>Ready, set.<br>Get curious.</h1><p>Join your host’s game, put your knowledge to the test, and climb the leaderboard.</p><p class="muted">No account needed. Just a code and a curious mind.</p></div>${joinForm()}</section>`;
+    document.querySelector('#join').onsubmit = run(async e => { e.preventDefault(); const code = document.querySelector('#code').value.trim(); remember(await api(`games/${code}/join`, {name:document.querySelector('#name').value})); });
+    return;
+  }
+  if(!adminToken) return login();
+  try { await api('admin/session'); } catch(e) { adminToken=''; sessionStorage.removeItem('socrate-admin-token'); login(); return; }
+  app.innerHTML = `<section><span class="eyebrow">ADMIN STUDIO</span><h1>Good questions.<br>Great company.</h1><p>Create quizzes and host games. Share the player address with your audience.</p><div class="row"><button id="create">＋ Create a quiz</button><a class="button secondary" href="/play" target="_blank" rel="noopener">Open player view ↗</a><button id="logout" class="ghost">Sign out</button></div><p class="muted">Player address: <strong id="player-address"></strong></p></section><div class="section-title"><div><span class="eyebrow">ADMIN ONLY</span><h2>Your quiz collection</h2></div><span class="muted">Saved on this computer</span></div><section class="grid" id="quizzes">Loading your quizzes…</section>`;
+  document.querySelector('#player-address').textContent = location.origin + '/play';
   document.querySelector('#create').onclick = () => editor();
-  document.querySelector('#join').onsubmit = run(async e => { e.preventDefault(); const code = document.querySelector('#code').value.trim(); remember(await api(`games/${code}/join`, {name:document.querySelector('#name').value})); });
+  document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';sessionStorage.removeItem('socrate-admin-token');login();});
   try {
     const quizzes = await api('quizzes');
     document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p>One room. Plenty of bright ideas.</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';
@@ -52,7 +75,7 @@ async function play() {
     const count=document.querySelector('#count'); if(count) count.textContent=`${g.answered} / ${g.players.length} answered`;
     const people=document.querySelector('#people'); if(people) people.innerHTML=g.players.map(p=>`<span class="chip">${esc(p.name)}</span>`).join('') || '<p>Waiting for your first player…</p>';
     poll=setTimeout(play,800);
-  } catch(e) { notice(e.message); app.innerHTML='<div class="card center"><h2>Game unavailable</h2><p>The server may have restarted. Return to the collection and start or join a new game.</p><button id="exit">Return home</button></div>'; document.querySelector('#exit').onclick=leave; }
+  } catch(e) { notice(e.message); app.innerHTML='<div class="card center"><h2>Game unavailable</h2><p>The server may have restarted. Return home and start or join a new game.</p><button id="exit">Return home</button></div>'; document.querySelector('#exit').onclick=leave; }
 }
 function ranking(g) { return `<div class="card">${g.players.map((p,i)=>`<div class="score"><span>${i+1}. ${esc(p.name)}</span><strong>${p.score} pts</strong></div>`).join('')||'<p>No players joined.</p>'}</div>`; }
 function renderGame(g) {
@@ -60,7 +83,7 @@ function renderGame(g) {
   if(g.phase==='lobby') body=`<span class="eyebrow">${esc(g.title)}</span><h1 style="margin-left:auto;margin-right:auto">The room is yours.</h1><p>Join on the same server address and enter this code:</p><div class="code">${g.code}</div><div class="players" id="people"></div>${g.host?'<button id="next">Start game →</button>':'<p>Get comfortable. Your host will start the game shortly.</p>'}`;
   if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><button id="next">Reveal answers</button>`:g.submitted?'<div class="card"><h2>Answer locked in ✓</h2><p>Let’s see how everyone did…</p></div>':`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
   if(g.phase==='results') { const q=g.question; const correct=q.type==='text'?q.answers.join(' / '):q.answers.map(i=>q.options[i]).join(', '); body=`<span class="eyebrow">QUESTION ${g.index+1} · RESULTS</span><h2>${esc(q.text)}</h2><div class="card"><span class="eyebrow">CORRECT ANSWER${q.answers.length>1?'S':''}</span><h2>${esc(correct)}</h2>${g.host?'':`<p>${g.correct?'You got it! Nicely done.':'Keep going. The next question is a fresh start.'}</p>`}</div><h2>Leaderboard</h2>${ranking(g)}${g.host?`<button style="margin-top:25px" id="next">${g.index+1===g.total?'Finish game':'Next question'} →</button>`:'<p>Waiting for your host…</p>'}`; }
-  if(g.phase==='finished') body=`<span class="eyebrow">THAT’S A WRAP</span><h1 style="margin-left:auto;margin-right:auto">${g.players.length?esc(g.players[0].name)+' wins!':'Thanks for playing!'}</h1><p>Good company makes every answer count.</p>${ranking(g)}<button style="margin-top:25px" id="done">Back to collection</button>`;
+  if(g.phase==='finished') body=`<span class="eyebrow">THAT’S A WRAP</span><h1 style="margin-left:auto;margin-right:auto">${g.players.length?esc(g.players[0].name)+' wins!':'Thanks for playing!'}</h1><p>Good company makes every answer count.</p>${ranking(g)}<button style="margin-top:25px" id="done">${adminView?'Back to collection':'Join another game'}</button>`;
   app.innerHTML=`<section class="game center"><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><button class="ghost" id="exit">Leave game</button></div>${body}</section>`;
   document.querySelector('#exit').onclick=()=>{if(confirm('Leave this game?')) leave();};
   const next=document.querySelector('#next'); if(next) next.onclick=run(async()=>{next.disabled=true;try{await api(`games/${g.code}/next`,{});await play();}finally{next.disabled=false;}});

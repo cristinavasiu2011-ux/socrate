@@ -14,6 +14,26 @@ ROOT = Path(__file__).parent
 DB = Path(os.environ.get('SOCRATE_DB', str(ROOT / 'data' / 'quizzes.db')))
 GAMES = {}
 LOCK = threading.RLock()
+ADMIN_SESSIONS = {}
+ADMIN_KEY = None
+
+
+def admin_key():
+    global ADMIN_KEY
+    if ADMIN_KEY is None:
+        ADMIN_KEY = os.environ.get('SOCRATE_ADMIN_KEY')
+        if not ADMIN_KEY:
+            key_file = DB.parent / 'admin-key.txt'
+            key_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with key_file.open('x', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+                    file.write(secrets.token_urlsafe(24))
+            except FileExistsError:
+                pass
+            ADMIN_KEY = key_file.read_text().strip()
+        if not ADMIN_KEY:
+            raise ValueError('Admin key must not be empty.')
+    return ADMIN_KEY
 
 
 def connect():
@@ -95,17 +115,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def require_admin(self):
+        token = self.headers.get('X-Admin-Token', '')
+        with LOCK:
+            valid = ADMIN_SESSIONS.get(token, 0) > time.time()
+        if not valid:
+            self.reply({'error': 'Admin sign-in required.'}, 403)
+        return valid
+
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            if path == '/api/admin/session':
+                if self.require_admin():
+                    self.reply({'admin': True})
+                return
             if path == '/api/quizzes':
+                if not self.require_admin():
+                    return
                 with connect() as db:
                     items = [dict(id=row[0], **json.loads(row[1])) for row in db.execute('SELECT id, body FROM quizzes ORDER BY rowid DESC')]
                 return self.reply(items)
             if path.startswith('/api/games/'):
                 with LOCK:
                     return self.reply(state(GAMES[path.split('/')[3]], self.headers.get('Authorization', '')))
-            files = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            files = {'/': ('index.html', 'text/html'), '/play': ('index.html', 'text/html'), '/admin': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             if path not in files:
                 return self.reply({'error': 'Not found'}, 404)
             name, mime = files[path]
@@ -128,6 +162,21 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('Expected a JSON object.')
             path = urlparse(self.path).path
             with LOCK:
+                if path == '/api/admin/login':
+                    if not secrets.compare_digest(str(data.get('key', '')).encode(), admin_key().encode()):
+                        return self.reply({'error': 'Incorrect admin key.'}, 403)
+                    now = time.time()
+                    for old in list(ADMIN_SESSIONS):
+                        if ADMIN_SESSIONS[old] <= now:
+                            del ADMIN_SESSIONS[old]
+                    token = secrets.token_urlsafe(32)
+                    ADMIN_SESSIONS[token] = now + 43200
+                    return self.reply({'token': token})
+                if path == '/api/admin/logout':
+                    ADMIN_SESSIONS.pop(self.headers.get('X-Admin-Token', ''), None)
+                    return self.reply({'ok': True})
+                if path in ('/api/quizzes', '/api/games') and not self.require_admin():
+                    return
                 if path == '/api/quizzes':
                     quiz = validate_quiz(data)
                     ident = secrets.token_hex(8)
@@ -207,5 +256,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     with connect():
         pass
+    print(f'Admin access key: {admin_key()}', flush=True)
+    print(f'Admin screen: http://{args.host}:{args.port}/admin', flush=True)
     print(f'Socrate is running at http://{args.host}:{args.port}', flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

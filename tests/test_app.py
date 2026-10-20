@@ -29,9 +29,9 @@ class GameTest(unittest.TestCase):
         cls.server.server_close()
         cls.temp.cleanup()
 
-    def request(self, path, data=None, token='', status=200, admin=True):
+    def request(self, path, data=None, token='', status=200, admin=True, method=None):
         conn = http.client.HTTPConnection(*self.server.server_address)
-        conn.request('GET' if data is None else 'POST', path,
+        conn.request(method or ('GET' if data is None else 'POST'), path,
                      None if data is None else json.dumps(data),
                      {'Authorization': token, 'Content-Type': 'application/json',
                       'X-Admin-Token': self.admin_token if admin else ''})
@@ -99,6 +99,26 @@ class GameTest(unittest.TestCase):
         result = self.request(base + '/next', {}, host['token'])
         self.assertEqual(result['phase'], 'finished')
         self.assertGreater(result['players'][0]['score'], 3500)
+
+    def test_delete_quiz_admin_only_and_running_game_survives(self):
+        quiz = self.request('/api/quizzes', dict(title='Delete me', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)
+        host = self.request('/api/games', {'quiz_id': quiz['id']}, status=201)
+        base = '/api/games/' + host['code']
+        player = self.request(base + '/join', {'name': 'Player'}, admin=False)
+        path = '/api/quizzes/' + quiz['id']
+        self.request(path, method='DELETE', admin=False, status=403)
+        self.request(path, method='DELETE', token=player['token'], admin=False, status=403)
+        self.assertTrue(any(q['id'] == quiz['id'] for q in self.request('/api/quizzes')))
+        self.assertTrue(self.request(path, method='DELETE')['deleted'])
+        self.assertFalse(any(q['id'] == quiz['id'] for q in self.request('/api/quizzes')))
+        with app.connect() as db:
+            self.assertIsNone(db.execute('SELECT id FROM quizzes WHERE id=?', (quiz['id'],)).fetchone())
+        self.request(path, method='DELETE', status=404)
+        self.request('/api/games', {'quiz_id': quiz['id']}, status=400)
+        self.request(base + '/next', {}, host['token'])
+        state = self.request(base, token=player['token'], admin=False)
+        self.assertEqual(state['question']['text'], 'True?')
+        self.request(base + '/answer', {'index': 0, 'answer': [0]}, player['token'], admin=False)
 
     def test_shared_timer_and_speed_scoring(self):
         q = self.request('/api/quizzes', dict(title='Shared clock', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)

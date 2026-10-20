@@ -19,8 +19,8 @@ function updateTimer() {
 }
 setInterval(updateTimer, 100);
 function notice(message) { const n = document.querySelector('#notice'); n.textContent = message; n.hidden = false; setTimeout(() => n.hidden = true, 5000); }
-async function api(path, data) {
-  const response = await fetch('/api/' + path, {method: data === undefined ? 'GET' : 'POST', headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
+async function api(path, data, method) {
+  const response = await fetch('/api/' + path, {method: method || (data === undefined ? 'GET' : 'POST'), headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
   const result = await response.json(); if (!response.ok) throw Error(result.error || 'Request failed'); return result;
 }
 function run(fn) { return async event => { try { await fn(event); } catch(e) { notice(e.message); } }; }
@@ -48,9 +48,16 @@ async function home() {
   document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';sessionStorage.removeItem('socrate-admin-token');login();});
   try {
     const quizzes = await api('quizzes');
-    document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p>One room. Plenty of bright ideas.</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';
+    document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p>One room. Plenty of bright ideas.</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button><button class="danger" data-delete="${q.id}">Delete</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';
     document.querySelectorAll('[data-host]').forEach(b => b.onclick = run(async () => remember(await api('games', {quiz_id:b.dataset.host}))));
     document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => editor(structuredClone(quizzes.find(q => q.id === b.dataset.copy))));
+    document.querySelectorAll('[data-delete]').forEach(b => b.onclick = run(async () => {
+      const quiz = quizzes.find(q => q.id === b.dataset.delete);
+      if(!confirm(`Delete “${quiz.title}”? This cannot be undone. Games already running will continue.`)) return;
+      b.disabled = true;
+      try { await api(`quizzes/${quiz.id}`, undefined, 'DELETE'); await home(); }
+      finally { b.disabled = false; }
+    }));
   } catch(e) { notice(e.message); }
 }
 function fresh() { return {type:'single',text:'',seconds:20,options:['','','',''],answers:[0]}; }

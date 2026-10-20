@@ -158,6 +158,18 @@ class Handler(BaseHTTPRequestHandler):
         except (KeyError, ValueError) as exc:
             self.reply({'error': str(exc) if isinstance(exc, ValueError) else 'Game not found. It may have ended or the server restarted.'}, 400)
 
+    def do_DELETE(self):
+        if not self.require_admin():
+            return
+        parts = urlparse(self.path).path.split('/')
+        if len(parts) != 4 or parts[1:3] != ['api', 'quizzes'] or not parts[3]:
+            return self.reply({'error': 'Not found'}, 404)
+        with LOCK, connect() as db:
+            deleted = db.execute('DELETE FROM quizzes WHERE id=?', (parts[3],)).rowcount
+        if not deleted:
+            return self.reply({'error': 'Quiz not found.'}, 404)
+        self.reply({'deleted': True})
+
     def do_POST(self):
         try:
             length = int(self.headers.get('Content-Length', 0))

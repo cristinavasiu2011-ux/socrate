@@ -29,6 +29,7 @@ Players open `http://YOUR-COMPUTER-LAN-IP:8075/play`. Admins use `/admin`. Allow
 - Single choice, multiple correct answers, true/false, and short text answers.
 - Per-question timers from 5–120 seconds; accepted text alternatives ignore case and surrounding spaces.
 - Local quiz collection, with duplicate-and-edit for creating variations.
+- Admins can delete quizzes from the collection after confirming. Deletion is permanent; games already running keep their quiz and continue normally.
 - Game lobby, unique nicknames, timed answers, answer reveal, and final leaderboard.
 - Correct answers earn `round(500 + 500 × (1 − response time / question duration))` points (500–1,000); incorrect and missed answers earn zero. Response time is measured when the server receives the answer. Multiple-answer questions require the exact set.
 - The host starts each question for everyone together. A shared server timer closes answers and reveals results when time runs out, even if everyone answered early. The host then starts the next question.

@@ -26,7 +26,7 @@ def admin_key():
             key_file = DB.parent / 'admin-key.txt'
             key_file.parent.mkdir(parents=True, exist_ok=True)
             try:
-                with key_file.open('x', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
+                with open(key_file, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
                     file.write(secrets.token_urlsafe(24))
             except FileExistsError:
                 pass

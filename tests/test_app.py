@@ -1,5 +1,7 @@
 import http.client
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -40,6 +42,40 @@ class GameTest(unittest.TestCase):
         self.assertEqual(response.status, status, raw)
         conn.close()
         return json.loads(raw)
+
+    def test_first_start_generates_and_reuses_private_admin_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / 'data' / 'quizzes.db'
+            with patch.object(app, 'DB', database), patch.object(app, 'ADMIN_KEY', None), patch.dict(os.environ, {}, clear=True):
+                key = app.admin_key()
+                self.assertTrue(key)
+                key_file = database.parent / 'admin-key.txt'
+                self.assertEqual(key_file.read_text(), key)
+                if os.name == 'posix':
+                    self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+                app.ADMIN_KEY = None
+                self.assertEqual(app.admin_key(), key)
+
+    def test_real_server_first_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = dict(os.environ, SOCRATE_DB=str(Path(tmp) / 'quizzes.db'))
+            settings.pop('SOCRATE_ADMIN_KEY', None)
+            process = subprocess.Popen(
+                [sys.executable, str(Path(app.__file__)), '--port', '0'],
+                env=settings, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                # A failed startup exits; a running server exceeds the timeout.
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    self.assertTrue((Path(tmp) / 'admin-key.txt').is_file())
+                else:
+                    self.fail('Server exited during startup: ' + stderr)
+            finally:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=5)
+            self.assertIn('Socrate is running', stdout)
+            self.assertNotIn('Traceback', stderr)
 
     def test_admin_boundaries(self):
         self.request('/api/quizzes', admin=False, status=403)

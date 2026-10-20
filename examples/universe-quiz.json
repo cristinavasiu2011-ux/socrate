@@ -1,0 +1,33 @@
+{
+  "title": "Explore the Universe",
+  "questions": [
+    {
+      "type": "single",
+      "text": "Which planet is the largest in our Solar System?",
+      "seconds": 20,
+      "options": ["Earth", "Saturn", "Jupiter", "Neptune"],
+      "answers": [2]
+    },
+    {
+      "type": "multiple",
+      "text": "Which of these planets have rings? Select all correct answers.",
+      "seconds": 30,
+      "options": ["Jupiter", "Saturn", "Earth", "Neptune"],
+      "answers": [0, 1, 3]
+    },
+    {
+      "type": "boolean",
+      "text": "The Sun is a star.",
+      "seconds": 15,
+      "options": ["True", "False"],
+      "answers": [0]
+    },
+    {
+      "type": "text",
+      "text": "What is the name of the galaxy that contains our Solar System?",
+      "seconds": 30,
+      "options": [],
+      "answers": ["Milky Way", "The Milky Way", "Milky Way Galaxy", "The Milky Way Galaxy"]
+    }
+  ]
+}

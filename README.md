@@ -40,3 +40,14 @@ python -m unittest discover -s tests -v
 ```
 
 Integration tests use a temporary database and exercise a complete four-question game, scoring, access control, duplicate answers, invalid quizzes, and timeouts.
+
+## Try the Universe sample quiz
+
+From this folder, run:
+
+```sh
+python import_quiz.py examples/universe-quiz.json
+python app.py
+```
+
+Refresh the collection and host **Explore the Universe**. It includes one single-choice, one multiple-answer, one true/false, and one short-answer question. Importing the same unchanged quiz again does not create a duplicate. The importer also accepts your own quiz JSON files in the same format.

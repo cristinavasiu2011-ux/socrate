@@ -77,6 +77,17 @@ class GameTest(unittest.TestCase):
             self.assertIn('Socrate is running', stdout)
             self.assertNotIn('Traceback', stderr)
 
+    def test_screen_routes_and_assets_are_not_cached(self):
+        for path in ('/', '/admin', '/admin/', '/play', '/play/', '/app.js', '/style.css'):
+            conn = http.client.HTTPConnection(*self.server.server_address)
+            conn.request('GET', path)
+            response = conn.getresponse()
+            body = response.read()
+            self.assertEqual(response.status, 200, path)
+            self.assertEqual(response.getheader('Cache-Control'), 'no-store', path)
+            self.assertTrue(body, path)
+            conn.close()
+
     def test_admin_boundaries(self):
         self.request('/api/quizzes', admin=False, status=403)
         self.request('/api/quizzes', {'title': 'Unauthorized'}, admin=False, status=403)

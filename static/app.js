@@ -1,9 +1,21 @@
 const app = document.querySelector('#app');
 const esc = x => String(x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const adminView = location.pathname === '/admin';
+const adminView = location.pathname.replace(/\/+$/, '') === '/admin';
 const sessionKey = adminView ? 'socrate-host-session' : 'socrate-player-session';
-let adminToken = sessionStorage.getItem('socrate-admin-token') || '';
-let session = JSON.parse(sessionStorage.getItem(sessionKey) || 'null');
+// Browsers may disable storage; stale or malformed sessions must not blank the page.
+const memoryStorage = new Map();
+const storage = {
+  getItem(key) { try { return sessionStorage.getItem(key); } catch { return memoryStorage.get(key) || null; } },
+  setItem(key, value) { memoryStorage.set(key, value); try { sessionStorage.setItem(key, value); } catch {} },
+  removeItem(key) { memoryStorage.delete(key); try { sessionStorage.removeItem(key); } catch {} }
+};
+let adminToken = storage.getItem('socrate-admin-token') || '';
+let session = null;
+try {
+  const saved = JSON.parse(storage.getItem(sessionKey) || 'null');
+  if(saved && typeof saved.code === 'string' && typeof saved.token === 'string') session = saved;
+  else storage.removeItem(sessionKey);
+} catch { storage.removeItem(sessionKey); }
 function nav() {
   document.querySelector('.brand').href = adminView ? '/admin' : '/play';
   document.querySelector('.local').innerHTML = adminView ? '<a href="/play">PLAYER VIEW ↗</a>' : '<a href="/admin">ADMIN SIGN IN ↗</a>';
@@ -24,14 +36,14 @@ async function api(path, data, method) {
   const result = await response.json(); if (!response.ok) throw Error(result.error || 'Request failed'); return result;
 }
 function run(fn) { return async event => { try { await fn(event); } catch(e) { notice(e.message); } }; }
-function remember(s) { session = s; sessionStorage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
-function leave() { clearTimeout(poll); session = null; sessionStorage.removeItem(sessionKey); home(); }
+function remember(s) { session = s; storage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
+function leave() { clearTimeout(poll); session = null; storage.removeItem(sessionKey); home(); }
 function joinForm() {
   return `<form class="card join" id="join"><span class="eyebrow">PLAYER VIEW</span><h2>Join the fun.</h2><p>Your host has a game code. You bring the answers.</p><label for="code">Game code</label><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><label for="name">Your nickname</label><input id="name" maxlength="30" placeholder="Curious mind" required><button>Join game →</button><p class="muted center">Connect to the same Wi-Fi as your host.</p></form>`;
 }
 function login() {
   app.innerHTML = `<div class="editor"><span class="eyebrow">ADMIN VIEW</span><h1 style="font-size:48px">Your quiz studio.</h1><form class="card" id="login"><h2>Admin sign in</h2><p>Enter the admin access key shown in the server terminal. Players don’t need this key.</p><label for="key">Admin access key</label><input id="key" type="password" autocomplete="current-password" required><button style="margin-top:20px">Sign in →</button></form><p><a href="/play">Go to player view</a></p></div>`;
-  document.querySelector('#login').onsubmit = run(async e => { e.preventDefault(); const result = await api('admin/login', {key:document.querySelector('#key').value}); adminToken = result.token; sessionStorage.setItem('socrate-admin-token', adminToken); await home(); });
+  document.querySelector('#login').onsubmit = run(async e => { e.preventDefault(); const result = await api('admin/login', {key:document.querySelector('#key').value}); adminToken = result.token; storage.setItem('socrate-admin-token', adminToken); await home(); });
 }
 async function home() {
   clearTimeout(poll);
@@ -41,11 +53,11 @@ async function home() {
     return;
   }
   if(!adminToken) return login();
-  try { await api('admin/session'); } catch(e) { adminToken=''; sessionStorage.removeItem('socrate-admin-token'); login(); return; }
+  try { await api('admin/session'); } catch(e) { adminToken=''; storage.removeItem('socrate-admin-token'); login(); return; }
   app.innerHTML = `<section><span class="eyebrow">ADMIN STUDIO</span><h1>Good questions.<br>Great company.</h1><p>Create quizzes and host games. Share the player address with your audience.</p><div class="row"><button id="create">＋ Create a quiz</button><a class="button secondary" href="/play" target="_blank" rel="noopener">Open player view ↗</a><button id="logout" class="ghost">Sign out</button></div><p class="muted">Player address: <strong id="player-address"></strong></p></section><div class="section-title"><div><span class="eyebrow">ADMIN ONLY</span><h2>Your quiz collection</h2></div><span class="muted">Saved on this computer</span></div><section class="grid" id="quizzes">Loading your quizzes…</section>`;
   document.querySelector('#player-address').textContent = location.origin + '/play';
   document.querySelector('#create').onclick = () => editor();
-  document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';sessionStorage.removeItem('socrate-admin-token');login();});
+  document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';storage.removeItem('socrate-admin-token');login();});
   try {
     const quizzes = await api('quizzes');
     document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p>One room. Plenty of bright ideas.</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button><button class="danger" data-delete="${q.id}">Delete</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';

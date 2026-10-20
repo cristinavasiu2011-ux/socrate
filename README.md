@@ -57,3 +57,16 @@ python app.py
 ```
 
 Sign in at `/admin`, refresh the collection, and host **Explore the Universe**. It includes one single-choice, one multiple-answer, one true/false, and one short-answer question. Importing the same unchanged quiz again does not create a duplicate. The importer also accepts your own quiz JSON files in the same format.
+
+## If a screen does not load
+
+Stop the old server with Ctrl+C, update the files, and restart:
+
+```sh
+git pull origin main
+python app.py --host 0.0.0.0 --port 8075
+```
+
+On the computer running Python, open `http://localhost:8075/admin` or `http://localhost:8075/play`. On another device, replace `localhost` with the server computer's local IP. Both routes also accept a trailing slash. Use HTTP, not HTTPS, and reload existing browser tabs after updating. The Python server must stay running; GitHub Pages or opening `static/index.html` directly cannot run the app.
+
+For optional browser checks, install Playwright and Chromium in your development environment, then run `python tests/browser_smoke.py`. Set `CHROMIUM_PATH` to use an existing Chromium executable. These are development tools; the app itself still has no package dependencies.

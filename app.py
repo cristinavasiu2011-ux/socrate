@@ -130,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
         return valid
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        path = urlparse(self.path).path.rstrip('/') or '/'
         try:
             if path == '/api/admin/session':
                 if self.require_admin():
@@ -152,6 +152,7 @@ class Handler(BaseHTTPRequestHandler):
             raw = (ROOT / 'static' / name).read_bytes()
             self.send_response(200)
             self.send_header('Content-Type', mime + '; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Length', str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -273,6 +274,10 @@ if __name__ == '__main__':
     with connect():
         pass
     print(f'Admin access key: {admin_key()}', flush=True)
-    print(f'Admin screen: http://{args.host}:{args.port}/admin', flush=True)
-    print(f'Socrate is running at http://{args.host}:{args.port}', flush=True)
+    browser_host = 'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host
+    print(f'Admin screen: http://{browser_host}:{args.port}/admin', flush=True)
+    print(f'Player screen: http://{browser_host}:{args.port}/play', flush=True)
+    if args.host == '0.0.0.0':
+        print(f'Other devices: use this computer’s LAN IP instead of localhost (port {args.port}).', flush=True)
+    print(f'Socrate is running on {args.host}:{args.port}', flush=True)
     ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()

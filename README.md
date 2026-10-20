@@ -10,7 +10,7 @@ Requires Python 3.10 or newer. From this folder:
 python app.py
 ```
 
-Open **http://localhost:8075/admin** to manage quizzes and host games. Sign in using the **Admin access key** printed in the server terminal. The key is generated on first startup and kept in `data/admin-key.txt`, so it stays the same after restarting. You can set `SOCRATE_ADMIN_KEY` before starting the server to use your own key instead. Keep it private.
+Open **http://localhost:8075/admin** to manage quizzes and host games. Sign in using the **Admin password** printed in the server terminal. New installations generate a readable password made of words and digits. It is kept in `data/admin-key.txt`, so it stays the same after restarting. Existing passwords remain valid until you change them. Keep your password private.
 
 Players open **http://localhost:8075/play** (or the root address), enter the six-digit game code and a nickname, and play. They cannot view the quiz collection, create quizzes, or host games. Admin access is enforced by the backend, not only by hiding controls. Use separate tabs or devices for hosting and playing; host and player sessions are stored separately.
 
@@ -31,10 +31,11 @@ Players open `http://YOUR-COMPUTER-LAN-IP:8075/play`. Admins use `/admin`. Allow
 - Single choice, multiple correct answers, true/false, and short text answers.
 - Per-question timers from 5–120 seconds; accepted text alternatives ignore case and surrounding spaces.
 - Local quiz collection, with duplicate-and-edit for creating variations.
+- The admin collection shows whether each quiz is waiting, started, showing results, or finished, along with its code and player count. Each quiz can have only one active game; hosting it again resumes the existing game. Use **End game** to close it before starting a fresh one.
 - Admins can delete quizzes from the collection after confirming. Deletion is permanent; games already running keep their quiz and continue normally.
 - Game lobby, unique nicknames, timed answers, answer reveal, and final leaderboard.
 - Simultaneous player connections, independent tab sessions, and automatic recovery after brief network interruptions. The admin lobby displays a LAN player URL when available.
-- Correct answers earn `round(500 + 500 × (1 − response time / question duration))` points (500–1,000); incorrect and missed answers earn zero. Response time is measured when the server receives the answer. Multiple-answer questions require the exact set.
+- Correct answers earn `round(1000 × time remaining / question duration)` points (0–1,000); incorrect and missed answers earn zero. Response time is measured when the server receives the answer. Multiple-answer questions require the exact set.
 - The host starts each question for everyone together. A shared server timer closes answers and reveals results when time runs out, even if everyone answered early. The host then starts the next question.
 - A smooth countdown follows the server timer; each device refreshes game state every 300 ms. Results show each player’s response time and points. Scores stay hidden until the timer ends.
 
@@ -73,3 +74,17 @@ python app.py --host 0.0.0.0 --port 8075
 On the computer running Python, open `http://localhost:8075/admin` or `http://localhost:8075/play`. On another device, replace `localhost` with the server computer's local IP. Both routes also accept a trailing slash. Use HTTP, not HTTPS, and reload existing browser tabs after updating. The Python server must stay running; GitHub Pages or opening `static/index.html` directly cannot run the app.
 
 For optional browser checks, install Playwright and Chromium in your development environment, then run `python tests/browser_smoke.py`. Set `CHROMIUM_PATH` to use an existing Chromium executable. These are development tools; the app itself still has no package dependencies.
+
+
+## Choose your own admin password
+
+Stop the app with Ctrl+C, then run:
+
+```sh
+python app.py --set-admin-password
+python app.py
+```
+
+Enter a password of at least 8 characters and confirm it. Typing is hidden in the terminal. The command saves your password locally without changing quizzes. Restart the app after changing it. If you use `SOCRATE_ADMIN_KEY`, change or unset that environment variable first because it overrides the saved password.
+
+Players in different browsers on the same computer can all use `http://localhost:8075/play`. Each player should enter a different nickname and the same game code before the host starts. They do not need the admin password.

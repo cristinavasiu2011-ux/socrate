@@ -23,6 +23,27 @@ function nav() {
 nav();
 let poll, draft, selected = [], lastKey = '', current, timerEnd = 0, pollVersion = 0;
 let playerAddress = location.origin + '/play';
+let collectionPoll, collectionVersion = 0;
+function stopCollection() { clearTimeout(collectionPoll); ++collectionVersion; }
+function updateQuizStatus(quizzes) {
+  for(const quiz of quizzes) {
+    const status = document.querySelector(`[data-status="${quiz.id}"]`);
+    const host = document.querySelector(`[data-host="${quiz.id}"]`);
+    const game = quiz.game;
+    const labels = {lobby:'Waiting for players', question:'Game started', results:'Game started · results', finished:'Finished'};
+    if(status) status.textContent = game ? `${labels[game.phase]} · Code ${game.code} · ${game.players} players` : 'Not started';
+    if(host) host.textContent = game?.active ? 'Resume game →' : 'Host game →';
+  }
+}
+async function refreshQuizStatus(version) {
+  if(version !== collectionVersion || !document.querySelector('#quizzes')) return;
+  try {
+    const quizzes = await api('quizzes');
+    if(version !== collectionVersion) return;
+    updateQuizStatus(quizzes);
+  } catch(e) { if(e.status === 403) { stopCollection(); notice('Admin session expired. Sign in again.'); return; } }
+  if(version === collectionVersion) collectionPoll = setTimeout(() => refreshQuizStatus(version), 2000);
+}
 function updateTimer() {
   const timer = document.querySelector('#timer');
   if(!timer) return;
@@ -43,16 +64,19 @@ async function api(path, data, method) {
   } finally { clearTimeout(timeout); }
 }
 function run(fn) { return async event => { try { await fn(event); } catch(e) { notice(e.message); } }; }
-function remember(s) { session = s; storage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
+function remember(s) { stopCollection(); session = s; storage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
 function leave() { ++pollVersion; clearTimeout(poll); session = null; storage.removeItem(sessionKey); home(); }
 function joinForm() {
   return `<form class="card join" id="join"><span class="eyebrow">PLAYER VIEW</span><h2>Join the fun.</h2><p>Your host has a game code. You bring the answers.</p><label for="code">Game code</label><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><label for="name">Your nickname</label><input id="name" maxlength="30" placeholder="Curious mind" required><button>Join game →</button><p class="muted center">Connect to the same Wi-Fi as your host.</p></form>`;
 }
 function login() {
-  app.innerHTML = `<div class="editor"><span class="eyebrow">ADMIN VIEW</span><h1 style="font-size:48px">Your quiz studio.</h1><form class="card" id="login"><h2>Admin sign in</h2><p>Enter the admin access key shown in the server terminal. Players don’t need this key.</p><label for="key">Admin access key</label><input id="key" type="password" autocomplete="current-password" required><button style="margin-top:20px">Sign in →</button></form><p><a href="/play">Go to player view</a></p></div>`;
+  stopCollection();
+  app.innerHTML = `<div class="editor"><span class="eyebrow">ADMIN VIEW</span><h1 style="font-size:48px">Your quiz studio.</h1><form class="card" id="login"><h2>Admin sign in</h2><p>Enter the admin password shown in the server terminal, or the password you chose. Players don’t need a password.</p><label for="key">Admin password</label><input id="key" type="password" autocomplete="current-password" required><button style="margin-top:20px">Sign in →</button></form><p><a href="/play">Go to player view</a></p></div>`;
   document.querySelector('#login').onsubmit = run(async e => { e.preventDefault(); const result = await api('admin/login', {key:document.querySelector('#key').value}); adminToken = result.token; storage.setItem('socrate-admin-token', adminToken); await home(); });
 }
 async function home() {
+  stopCollection();
+  const collection = collectionVersion;
   ++pollVersion;
   clearTimeout(poll);
   if(!adminView) {
@@ -68,8 +92,11 @@ async function home() {
   document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';storage.removeItem('socrate-admin-token');login();});
   try {
     const quizzes = await api('quizzes');
-    document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p>One room. Plenty of bright ideas.</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button><button class="danger" data-delete="${q.id}">Delete</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';
-    document.querySelectorAll('[data-host]').forEach(b => b.onclick = run(async () => remember(await api('games', {quiz_id:b.dataset.host}))));
+    if(collection !== collectionVersion) return;
+    document.querySelector('#quizzes').innerHTML = quizzes.length ? quizzes.map(q => `<article class="card quiz"><span class="badge">${q.questions.length} QUESTIONS</span><h3>${esc(q.title)}</h3><p class="muted" data-status="${q.id}" role="status">Not started</p><div class="row"><button data-host="${q.id}">Host game →</button><button class="ghost" data-copy="${q.id}">Duplicate & edit</button><button class="danger" data-delete="${q.id}">Delete</button></div></article>`).join('') : '<div class="empty">Your next great quiz starts here. Create your first one above.</div>';
+    document.querySelectorAll('[data-host]').forEach(b => b.onclick = run(async () => { b.disabled=true; try { remember(await api('games', {quiz_id:b.dataset.host})); } finally { b.disabled=false; } }));
+    updateQuizStatus(quizzes);
+    collectionPoll = setTimeout(() => refreshQuizStatus(collection), 2000);
     document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => editor(structuredClone(quizzes.find(q => q.id === b.dataset.copy))));
     document.querySelectorAll('[data-delete]').forEach(b => b.onclick = run(async () => {
       const quiz = quizzes.find(q => q.id === b.dataset.delete);
@@ -81,7 +108,7 @@ async function home() {
   } catch(e) { notice(e.message); }
 }
 function fresh() { return {type:'single',text:'',seconds:20,options:['','','',''],answers:[0]}; }
-function editor(quiz) { draft = quiz || {title:'',questions:[fresh()]}; renderEditor(); }
+function editor(quiz) { stopCollection(); draft = quiz || {title:'',questions:[fresh()]}; renderEditor(); }
 function capture() {
   draft.title = document.querySelector('#title').value;
   document.querySelectorAll('[data-question]').forEach((el,i) => {
@@ -131,12 +158,14 @@ function ranking(g) { return `<div class="card">${g.players.map((p,i)=>`<div cla
 function renderGame(g) {
   let body='';
   if(g.phase==='lobby') body=`<span class="eyebrow">${esc(g.title)}</span><h1 style="margin-left:auto;margin-right:auto">The room is yours.</h1><p>Join on the same server address and enter this code:</p>${g.host?`<p>Player address: <strong>${esc(playerAddress)}</strong></p>`:''}<div class="code">${g.code}</div><div class="players" id="people"></div>${g.host?'<button id="next">Start game →</button>':'<p>Get comfortable. Your host will start the game shortly.</p>'}`;
-  if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p><p class="muted">Correct answers earn 500 points + up to 500 for speed. Incorrect or missed answers earn 0.</p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><p>Everyone has the same timer. Results appear when time is up.</p>`:g.submitted?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><div class="card"><h2>Answer locked in ✓</h2><p>Waiting for the shared timer to finish…</p></div>`:`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
+  if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p><p class="muted">Correct answers earn up to 1,000 points, proportional to time remaining. Incorrect or missed answers earn 0.</p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><p>Everyone has the same timer. Results appear when time is up.</p>`:g.submitted?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><div class="card"><h2>Answer locked in ✓</h2><p>Waiting for the shared timer to finish…</p></div>`:`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
   if(g.phase==='results') { const q=g.question; const correct=q.type==='text'?q.answers.join(' / '):q.answers.map(i=>q.options[i]).join(', '); body=`<span class="eyebrow">QUESTION ${g.index+1} · RESULTS</span><h2>${esc(q.text)}</h2><div class="card"><span class="eyebrow">CORRECT ANSWER${q.answers.length>1?'S':''}</span><h2>${esc(correct)}</h2>${g.host?'':`<p>${g.correct?'Correct!':'Incorrect or no answer.'} <strong>+${g.points} points</strong>${g.response_seconds == null ? '' : ` · Answered in ${g.response_seconds.toFixed(2)}s`}</p>`}</div><h2>Leaderboard</h2>${ranking(g)}${g.host?`<button style="margin-top:25px" id="next">${g.index+1===g.total?'Finish game':'Next question'} →</button>`:'<p>Waiting for your host…</p>'}`; }
   if(g.phase==='finished') body=`<span class="eyebrow">THAT’S A WRAP</span><h1 style="margin-left:auto;margin-right:auto">${g.players.length?esc(g.players[0].name)+' wins!':'Thanks for playing!'}</h1><p>Good company makes every answer count.</p>${ranking(g)}<button style="margin-top:25px" id="done">${adminView?'Back to collection':'Join another game'}</button>`;
-  app.innerHTML=`<section class="game center"><p id="connection" role="status" class="card" hidden></p><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><button class="ghost" id="exit">Leave game</button></div>${body}</section>`;
+  app.innerHTML=`<section class="game center"><p id="connection" role="status" class="card" hidden></p><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><div class="row">${g.host && g.phase!=='finished'?'<button class="danger" id="end-game">End game</button>':''}<button class="ghost" id="exit">${g.host?'Admin collection':'Leave game'}</button></div></div>${body}</section>`;
   document.querySelector('#exit').onclick=()=>{if(confirm('Leave this game?')) leave();};
   const next=document.querySelector('#next'); if(next) next.onclick=run(async()=>{next.disabled=true;try{await api(`games/${g.code}/next`,{});await play();}finally{next.disabled=false;}});
+  const endGame = document.querySelector('#end-game');
+  if(endGame) endGame.onclick = run(async()=>{if(confirm('End this game for all players?')) { await api(`games/${g.code}/end`, {}); leave(); }});
   const done=document.querySelector('#done'); if(done) done.onclick=leave;
   document.querySelectorAll('[data-answer]').forEach(b=>b.onclick=()=>{const i=Number(b.dataset.answer);selected=g.question.type==='multiple'?(selected.includes(i)?selected.filter(x=>x!==i):[...selected,i]):[i];document.querySelectorAll('[data-answer]').forEach(x=>{const active=selected.includes(Number(x.dataset.answer));x.classList.toggle('selected',active);x.setAttribute('aria-pressed',String(active));});});
   const form=document.querySelector('#answer'); if(form) form.onsubmit=run(async e=>{e.preventDefault();const answer=g.question.type==='text'?document.querySelector('#written').value:selected;if(g.question.type!=='text'&&!answer.length)throw Error('Choose an answer first.');await api(`games/${g.code}/answer`,{index:g.index,answer});await play();});

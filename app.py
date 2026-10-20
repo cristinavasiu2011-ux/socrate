@@ -1,5 +1,6 @@
 """Socrate: dependency-free local multiplayer quizzes. Run python app.py."""
 import argparse
+import getpass
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import secrets
 import sqlite3
 import socket
 import threading
+import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -19,6 +21,40 @@ ADMIN_SESSIONS = {}
 ADMIN_KEY = None
 
 
+PASSWORD_WORDS = ('amber apple atlas autumn bamboo beach birch blue breeze brook cedar cherry '
+                  'cloud coral cosmos dawn delta dune earth echo elm fern field flame forest '
+                  'frost garden globe gold grape green harbor hazel hill honey iris island jade '
+                  'lake leaf lemon lilac lunar maple meadow mint moon moss ocean olive orbit '
+                  'peach pearl pine planet plum pond rain river robin rose ruby sage sand sky '
+                  'snow solar star stone summer sun tide tulip valley violet wave willow wind').split()
+
+
+def readable_password():
+    return '-'.join(secrets.choice(PASSWORD_WORDS) for _ in range(4)) + f'-{secrets.randbelow(9000) + 1000}'
+
+
+def set_admin_password(password):
+    global ADMIN_KEY
+    if os.environ.get('SOCRATE_ADMIN_KEY'):
+        raise ValueError('SOCRATE_ADMIN_KEY is set. Change or unset it before setting a saved password.')
+    if not 8 <= len(password) <= 128 or password != password.strip():
+        raise ValueError('Use 8–128 characters without leading or trailing spaces.')
+    key_file = DB.parent / 'admin-key.txt'
+    key_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=key_file.parent,
+                                         prefix='.admin-', delete=False) as file:
+            temporary = Path(file.name)
+            file.write(password)
+        os.replace(temporary, key_file)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    ADMIN_KEY = password
+    ADMIN_SESSIONS.clear()
+
+
 def admin_key():
     global ADMIN_KEY
     if ADMIN_KEY is None:
@@ -28,7 +64,7 @@ def admin_key():
             key_file.parent.mkdir(parents=True, exist_ok=True)
             try:
                 with open(key_file, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as file:
-                    file.write(secrets.token_urlsafe(24))
+                    file.write(readable_password())
             except FileExistsError:
                 pass
             ADMIN_KEY = key_file.read_text().strip()
@@ -112,6 +148,16 @@ def state(game, token):
     return result
 
 
+def quiz_game_status(quiz_id):
+    matches = [game for game in GAMES.values() if game.get('quiz_id') == quiz_id]
+    game = next((game for game in matches if game['phase'] != 'finished'), matches[-1] if matches else None)
+    if game is None:
+        return None
+    expire(game)
+    return dict(code=game['code'], phase=game['phase'], players=len(game['players']),
+                active=game['phase'] != 'finished')
+
+
 class QuizServer(ThreadingHTTPServer):
     # A classroom can open dozens of browser connections at the same instant.
     request_queue_size = 128
@@ -169,6 +215,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 with connect() as db:
                     items = [dict(id=row[0], **json.loads(row[1])) for row in db.execute('SELECT id, body FROM quizzes ORDER BY rowid DESC')]
+                with LOCK:
+                    for item in items:
+                        item['game'] = quiz_game_status(item['id'])
                 return self.reply(items)
             if path.startswith('/api/games/'):
                 with LOCK:
@@ -245,11 +294,14 @@ class Handler(BaseHTTPRequestHandler):
                 row = db.execute('SELECT body FROM quizzes WHERE id=?', (data['quiz_id'],)).fetchone()
             if row is None:
                 raise ValueError('Quiz not found.')
+            for existing in GAMES.values():
+                if existing.get('quiz_id') == data['quiz_id'] and existing['phase'] != 'finished':
+                    return response(dict(code=existing['code'], token=existing['host'], resumed=True))
             code = str(secrets.randbelow(900000) + 100000)
             while code in GAMES:
                 code = str(secrets.randbelow(900000) + 100000)
             token = secrets.token_urlsafe(24)
-            GAMES[code] = dict(code=code, host=token, quiz=json.loads(row[0]), players={}, phase='lobby', index=-1, submissions={})
+            GAMES[code] = dict(code=code, host=token, quiz_id=data['quiz_id'], quiz=json.loads(row[0]), players={}, phase='lobby', index=-1, submissions={})
             return response(dict(code=code, token=token), 201)
         parts = path.split('/')
         if len(parts) != 5 or parts[1:3] != ['api', 'games']:
@@ -267,6 +319,11 @@ class Handler(BaseHTTPRequestHandler):
             token = secrets.token_urlsafe(24)
             game['players'][token] = dict(name=name, score=0)
             return response(dict(code=game['code'], token=token))
+        if action == 'end':
+            if not secrets.compare_digest(token, game['host']):
+                return response({'error': 'Host access required.'}, 403)
+            game['phase'] = 'finished'
+            return response(state(game, token))
         if action == 'next':
             if not secrets.compare_digest(token, game['host']):
                 return response({'error': 'Host access required.'}, 403)
@@ -296,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('Select an answer.')
                 correct = sorted(set(answer)) == q['answers']
             elapsed = max(0, time.time() - game['started'])
-            points = round(500 + 500 * max(0, 1 - elapsed / q['seconds'])) if correct else 0
+            points = round(1000 * max(0, 1 - elapsed / q['seconds'])) if correct else 0
             game['submissions'][token] = dict(correct=correct, points=points, response_seconds=round(elapsed, 2))
             return response({'accepted': True})
         return response({'error': 'Not found'}, 404)
@@ -306,10 +363,23 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', default=8075, type=int)
+    parser.add_argument('--set-admin-password', action='store_true', help='Choose a new admin password, then exit')
     args = parser.parse_args()
+    if args.set_admin_password:
+        try:
+            password = getpass.getpass('New admin password (at least 8 characters): ')
+            confirmation = getpass.getpass('Confirm new password: ')
+            if password != confirmation:
+                raise ValueError('Passwords do not match. Nothing was changed.')
+            set_admin_password(password)
+        except (ValueError, OSError) as exc:
+            parser.exit(1, f'{exc}\n')
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, 'Password change cancelled.\n')
+        parser.exit(0, 'Admin password saved. Start the app again to use it.\n')
     with connect():
         pass
-    print(f'Admin access key: {admin_key()}', flush=True)
+    print(f'Admin password: {admin_key()}', flush=True)
     browser_host = 'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host
     print(f'Admin screen: http://{browser_host}:{args.port}/admin', flush=True)
     print(f'Player screen: http://{browser_host}:{args.port}/play', flush=True)

@@ -57,6 +57,40 @@ class GameTest(unittest.TestCase):
                 app.ADMIN_KEY = None
                 self.assertEqual(app.admin_key(), key)
 
+    def test_change_admin_password_and_sign_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            database = Path(tmp) / 'quizzes.db'
+            with patch.object(app, 'DB', database), patch.object(app, 'ADMIN_KEY', None), patch.object(app, 'ADMIN_SESSIONS', {}), patch.dict(os.environ, {}, clear=True):
+                old_password = app.admin_key()
+                self.assertEqual(len(old_password.split('-')), 5)
+                app.ADMIN_SESSIONS['old-session'] = app.time.time() + 100
+                app.set_admin_password('My readable password 42')
+                self.assertFalse(app.ADMIN_SESSIONS)
+                self.request('/api/admin/login', {'key': old_password}, admin=False, status=403)
+                self.assertIn('token', self.request('/api/admin/login', {'key': 'My readable password 42'}, admin=False))
+                app.ADMIN_KEY = None
+                self.assertEqual(app.admin_key(), 'My readable password 42')
+                with self.assertRaises(ValueError):
+                    app.set_admin_password('short')
+                self.assertEqual(app.admin_key(), 'My readable password 42')
+                with patch.dict(os.environ, {'SOCRATE_ADMIN_KEY': 'environment-override'}):
+                    with self.assertRaises(ValueError):
+                        app.set_admin_password('Another password 42')
+                if os.name == 'posix':
+                    self.assertEqual((Path(tmp) / 'admin-key.txt').stat().st_mode & 0o777, 0o600)
+
+    def test_password_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = dict(os.environ, SOCRATE_DB=str(Path(tmp) / 'quizzes.db'))
+            settings.pop('SOCRATE_ADMIN_KEY', None)
+            command = [sys.executable, str(Path(app.__file__)), '--set-admin-password']
+            result = subprocess.run(command, input='Friendly password 42\nFriendly password 42\n', text=True, capture_output=True, env=settings, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((Path(tmp) / 'admin-key.txt').read_text(), 'Friendly password 42')
+            result = subprocess.run(command, input='Different password\nMismatch password\n', text=True, capture_output=True, env=settings, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((Path(tmp) / 'admin-key.txt').read_text(), 'Friendly password 42')
+
     def test_real_server_first_start(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = dict(os.environ, SOCRATE_DB=str(Path(tmp) / 'quizzes.db'))
@@ -202,11 +236,43 @@ class GameTest(unittest.TestCase):
         self.assertEqual(len(results['players']), count)
         self.assertTrue(all(p['score'] > 500 for p in results['players']))
 
+    def test_single_active_game_and_admin_status(self):
+        quiz = self.request('/api/quizzes', dict(title='One active game', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)
+        def metadata():
+            return next(q for q in self.request('/api/quizzes') if q['id'] == quiz['id'])['game']
+        self.assertIsNone(metadata())
+        host = self.request('/api/games', {'quiz_id': quiz['id']}, status=201)
+        base = '/api/games/' + host['code']
+        self.assertEqual(metadata()['phase'], 'lobby')
+        barrier = threading.Barrier(12)
+        def host_again(_):
+            barrier.wait(timeout=5)
+            return self.request('/api/games', {'quiz_id': quiz['id']})
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            resumed = list(pool.map(host_again, range(12)))
+        self.assertEqual({game['code'] for game in resumed}, {host['code']})
+        self.assertTrue(all(game['resumed'] for game in resumed))
+        player = self.request(base + '/join', {'name': 'Player'}, admin=False)
+        self.request(base + '/next', {}, host['token'])
+        self.assertEqual(metadata()['phase'], 'question')
+        self.assertEqual(metadata()['players'], 1)
+        self.assertTrue(metadata()['active'])
+        self.assertNotIn('token', metadata())
+        self.request(base + '/end', {}, player['token'], admin=False, status=403)
+        self.request(base + '/end', {}, host['token'])
+        self.assertFalse(metadata()['active'])
+        self.assertEqual(metadata()['phase'], 'finished')
+        fresh = self.request('/api/games', {'quiz_id': quiz['id']}, status=201)
+        self.assertNotEqual(fresh['code'], host['code'])
+        # A second quiz remains independently hostable.
+        other = self.request('/api/quizzes', dict(title='Other quiz', questions=quiz['questions']), status=201)
+        self.request('/api/games', {'quiz_id': other['id']}, status=201)
+
     def test_shared_timer_and_speed_scoring(self):
         q = self.request('/api/quizzes', dict(title='Shared clock', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)
         h = self.request('/api/games', {'quiz_id': q['id']}, status=201)
         base = '/api/games/' + h['code']
-        players = [self.request(base + '/join', {'name': name}, admin=False) for name in ('Fast', 'Slow', 'Wrong', 'Missed')]
+        players = [self.request(base + '/join', {'name': name}, admin=False) for name in ('Fast', 'Slow', 'Wrong', 'Missed', 'Late')]
         self.request(base + '/next', {}, h['token'])
         start = app.GAMES[h['code']]['started']
         with patch('app.time.time', return_value=start + 2):
@@ -223,6 +289,8 @@ class GameTest(unittest.TestCase):
             self.assertEqual(hidden['phase'], 'question')
             self.assertTrue(all(p['score'] == 0 for p in hidden['players']))
             self.assertNotIn('answers', hidden['question'])
+        with patch('app.time.time', return_value=start + 19):
+            self.request(base + '/answer', {'index': 0, 'answer': [0]}, players[4]['token'], admin=False)
         with patch('app.time.time', return_value=start + 20):
             self.request(base + '/answer', {'index': 0, 'answer': [0]}, players[3]['token'], admin=False, status=400)
             fast = self.request(base, token=players[0]['token'], admin=False)
@@ -230,14 +298,15 @@ class GameTest(unittest.TestCase):
             wrong = self.request(base, token=players[2]['token'], admin=False)
             missed = self.request(base, token=players[3]['token'], admin=False)
             self.assertEqual(fast['phase'], 'results')
-            self.assertEqual(fast['points'], 950)
-            self.assertEqual(slow['points'], 750)
+            self.assertEqual(fast['points'], 900)
+            self.assertEqual(slow['points'], 500)
             self.assertEqual(fast['response_seconds'], 2)
             self.assertEqual(slow['response_seconds'], 10)
+            self.assertEqual(self.request(base, token=players[4]['token'], admin=False)['points'], 50)
             self.assertEqual(wrong['points'], 0)
             self.assertEqual(missed['points'], 0)
             self.assertIsNone(missed['response_seconds'])
-            self.assertEqual(fast['players'][0], {'name': 'Fast', 'score': 950})
+            self.assertEqual(fast['players'][0], {'name': 'Fast', 'score': 900})
             self.assertEqual(self.request(base, token=h['token'])['players'], fast['players'])
 
     def test_timeout_and_invalid_quiz(self):

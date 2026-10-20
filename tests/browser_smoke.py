@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory() as tmp:
     quiz=app.validate_quiz(json.loads((ROOT / 'examples/universe-quiz.json').read_text()))
     with app.connect() as db:
         db.execute('INSERT INTO quizzes VALUES (?,?)', ('test',json.dumps(quiz)))
-    server=ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
+    server=app.QuizServer(('127.0.0.1',0),app.Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     origin=f'http://127.0.0.1:{server.server_port}'
     try:
@@ -34,11 +34,37 @@ with tempfile.TemporaryDirectory() as tmp:
             player.get_by_label('Your nickname').fill('Tester')
             player.get_by_role('button',name='Join game').click()
             player.get_by_text('Get comfortable.',exact=False).wait_for()
+            shared_context = browser.new_context()
+            extra_players = []
+            for index in range(3):
+                tab = shared_context.new_page()
+                tab.on('pageerror',lambda error: errors.append(str(error)))
+                tab.goto(origin + '/play')
+                tab.get_by_label('Game code').fill(code)
+                tab.get_by_label('Your nickname').fill(f'Extra {index}')
+                tab.get_by_role('button',name='Join game').click()
+                tab.get_by_text('Get comfortable.',exact=False).wait_for()
+                extra_players.append(tab)
+            tokens = [tab.evaluate("JSON.parse(sessionStorage.getItem('socrate-player-session')).token") for tab in extra_players]
+            assert len(set(tokens)) == 3
+            admin.get_by_text('Extra 2',exact=True).wait_for()
             admin.get_by_role('button',name='Start game').click()
             player.get_by_role('button',name='Jupiter',exact=True).click()
             player.get_by_role('button',name='Lock in answer').click()
             player.get_by_text('Answer locked in',exact=False).wait_for()
-            print('Normal /admin and /play sign-in, host, join, answer: PASSED')
+            for tab in extra_players:
+                tab.get_by_role('button',name='Jupiter',exact=True).click()
+                tab.get_by_role('button',name='Lock in answer').click()
+                tab.get_by_text('Answer locked in',exact=False).wait_for()
+            admin.get_by_text('4 / 4 answered',exact=True).wait_for()
+            # A temporary network loss must not remove the player or end polling.
+            player.context.set_offline(True)
+            player.locator('#connection').wait_for(state='visible')
+            player.context.set_offline(False)
+            player.locator('#connection').wait_for(state='hidden')
+            player.get_by_text('Answer locked in',exact=False).wait_for()
+            shared_context.close()
+            print('Four browser players, separate tab identities, and reconnection: PASSED')
             for route in ['/admin', '/admin/', '/play', '/play/']:
                 page=browser.new_page()
                 response=page.goto(origin+route)

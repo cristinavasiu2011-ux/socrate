@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import secrets
 import sqlite3
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -111,6 +112,28 @@ def state(game, token):
     return result
 
 
+class QuizServer(ThreadingHTTPServer):
+    # A classroom can open dozens of browser connections at the same instant.
+    request_queue_size = 128
+    daemon_threads = True
+
+
+def lan_addresses():
+    addresses = set()
+    try:
+        addresses.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    try:
+        # Determine the local interface used by the default route; sends no data.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(('192.0.2.1', 9))
+            addresses.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(ip for ip in addresses if not ip.startswith('127.') and ip != '0.0.0.0')
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, data, status=200):
         raw = json.dumps(data).encode()
@@ -132,6 +155,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path.rstrip('/') or '/'
         try:
+            if path == '/api/server-info':
+                host, port = self.server.server_address[:2]
+                addresses = lan_addresses() if host == '0.0.0.0' else [host]
+                urls = [f'http://{address}:{port}/play' for address in addresses if not address.startswith('127.')]
+                return self.reply({'player_urls': urls, 'local_only': host.startswith('127.')})
             if path == '/api/admin/session':
                 if self.require_admin():
                     self.reply({'admin': True})
@@ -144,7 +172,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(items)
             if path.startswith('/api/games/'):
                 with LOCK:
-                    return self.reply(state(GAMES[path.split('/')[3]], self.headers.get('Authorization', '')))
+                    snapshot = state(GAMES[path.split('/')[3]], self.headers.get('Authorization', ''))
+                return self.reply(snapshot)
             files = {'/': ('index.html', 'text/html'), '/play': ('index.html', 'text/html'), '/admin': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
             if path not in files:
                 return self.reply({'error': 'Not found'}, 404)
@@ -180,95 +209,102 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError('Expected a JSON object.')
             path = urlparse(self.path).path
+            if path in ('/api/quizzes', '/api/games') and not self.require_admin():
+                return
             with LOCK:
-                if path == '/api/admin/login':
-                    if not secrets.compare_digest(str(data.get('key', '')).encode(), admin_key().encode()):
-                        return self.reply({'error': 'Incorrect admin key.'}, 403)
-                    now = time.time()
-                    for old in list(ADMIN_SESSIONS):
-                        if ADMIN_SESSIONS[old] <= now:
-                            del ADMIN_SESSIONS[old]
-                    token = secrets.token_urlsafe(32)
-                    ADMIN_SESSIONS[token] = now + 43200
-                    return self.reply({'token': token})
-                if path == '/api/admin/logout':
-                    ADMIN_SESSIONS.pop(self.headers.get('X-Admin-Token', ''), None)
-                    return self.reply({'ok': True})
-                if path in ('/api/quizzes', '/api/games') and not self.require_admin():
-                    return
-                if path == '/api/quizzes':
-                    quiz = validate_quiz(data)
-                    ident = secrets.token_hex(8)
-                    with connect() as db:
-                        db.execute('INSERT INTO quizzes VALUES (?, ?)', (ident, json.dumps(quiz)))
-                    return self.reply(dict(id=ident, **quiz), 201)
-                if path == '/api/games':
-                    with connect() as db:
-                        row = db.execute('SELECT body FROM quizzes WHERE id=?', (data['quiz_id'],)).fetchone()
-                    if row is None:
-                        raise ValueError('Quiz not found.')
-                    code = str(secrets.randbelow(900000) + 100000)
-                    while code in GAMES:
-                        code = str(secrets.randbelow(900000) + 100000)
-                    token = secrets.token_urlsafe(24)
-                    GAMES[code] = dict(code=code, host=token, quiz=json.loads(row[0]), players={}, phase='lobby', index=-1, submissions={})
-                    return self.reply(dict(code=code, token=token), 201)
-                parts = path.split('/')
-                if len(parts) != 5 or parts[1:3] != ['api', 'games']:
-                    return self.reply({'error': 'Not found'}, 404)
-                game = GAMES[parts[3]]
-                expire(game)
-                action = parts[4]
-                token = self.headers.get('Authorization', '')
-                if action == 'join':
-                    name = str(data.get('name', '')).strip()[:30]
-                    if game['phase'] != 'lobby' or not name:
-                        raise ValueError('Enter a nickname and join before the game starts.')
-                    if any(p['name'].casefold() == name.casefold() for p in game['players'].values()):
-                        raise ValueError('That nickname is already taken.')
-                    token = secrets.token_urlsafe(24)
-                    game['players'][token] = dict(name=name, score=0)
-                    return self.reply(dict(code=game['code'], token=token))
-                if action == 'next':
-                    if not secrets.compare_digest(token, game['host']):
-                        return self.reply({'error': 'Host access required.'}, 403)
-                    if game['phase'] == 'question':
-                        raise ValueError('Wait for the shared question timer to finish.')
-                    elif game['phase'] in ('lobby', 'results'):
-                        game['index'] += 1
-                        game['submissions'] = {}
-                        if game['index'] == len(game['quiz']['questions']):
-                            game['phase'] = 'finished'
-                        else:
-                            game['phase'] = 'question'
-                            game['started'] = time.time()
-                            game['deadline'] = game['started'] + question(game)['seconds']
-                    return self.reply(state(game, token))
-                if action == 'answer':
-                    if token not in game['players']:
-                        return self.reply({'error': 'Player access required.'}, 403)
-                    if game['phase'] != 'question' or token in game['submissions'] or data.get('index') != game['index']:
-                        raise ValueError('This question is closed or already answered.')
-                    q = question(game)
-                    answer = data.get('answer')
-                    if q['type'] == 'text':
-                        correct = isinstance(answer, str) and answer.strip().casefold() in [x.casefold() for x in q['answers']]
-                    else:
-                        if not isinstance(answer, list) or any(type(x) is not int for x in answer):
-                            raise ValueError('Select an answer.')
-                        correct = sorted(set(answer)) == q['answers']
-                    elapsed = max(0, time.time() - game['started'])
-                    points = round(500 + 500 * max(0, 1 - elapsed / q['seconds'])) if correct else 0
-                    game['submissions'][token] = dict(correct=correct, points=points, response_seconds=round(elapsed, 2))
-                    return self.reply({'accepted': True})
-                return self.reply({'error': 'Not found'}, 404)
+                result, status = self.post_action(path, data)
+            self.reply(result, status)
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             self.reply({'error': str(exc) if isinstance(exc, ValueError) else 'Invalid request or game not found.'}, 400)
+
+    def post_action(self, path, data):
+        def response(data, status=200):
+            return data, status
+
+        if path == '/api/admin/login':
+            if not secrets.compare_digest(str(data.get('key', '')).encode(), admin_key().encode()):
+                return response({'error': 'Incorrect admin key.'}, 403)
+            now = time.time()
+            for old in list(ADMIN_SESSIONS):
+                if ADMIN_SESSIONS[old] <= now:
+                    del ADMIN_SESSIONS[old]
+            token = secrets.token_urlsafe(32)
+            ADMIN_SESSIONS[token] = now + 43200
+            return response({'token': token})
+        if path == '/api/admin/logout':
+            ADMIN_SESSIONS.pop(self.headers.get('X-Admin-Token', ''), None)
+            return response({'ok': True})
+        if path == '/api/quizzes':
+            quiz = validate_quiz(data)
+            ident = secrets.token_hex(8)
+            with connect() as db:
+                db.execute('INSERT INTO quizzes VALUES (?, ?)', (ident, json.dumps(quiz)))
+            return response(dict(id=ident, **quiz), 201)
+        if path == '/api/games':
+            with connect() as db:
+                row = db.execute('SELECT body FROM quizzes WHERE id=?', (data['quiz_id'],)).fetchone()
+            if row is None:
+                raise ValueError('Quiz not found.')
+            code = str(secrets.randbelow(900000) + 100000)
+            while code in GAMES:
+                code = str(secrets.randbelow(900000) + 100000)
+            token = secrets.token_urlsafe(24)
+            GAMES[code] = dict(code=code, host=token, quiz=json.loads(row[0]), players={}, phase='lobby', index=-1, submissions={})
+            return response(dict(code=code, token=token), 201)
+        parts = path.split('/')
+        if len(parts) != 5 or parts[1:3] != ['api', 'games']:
+            return response({'error': 'Not found'}, 404)
+        game = GAMES[parts[3]]
+        expire(game)
+        action = parts[4]
+        token = self.headers.get('Authorization', '')
+        if action == 'join':
+            name = str(data.get('name', '')).strip()[:30]
+            if game['phase'] != 'lobby' or not name:
+                raise ValueError('Enter a nickname and join before the game starts.')
+            if any(p['name'].casefold() == name.casefold() for p in game['players'].values()):
+                raise ValueError('That nickname is already taken.')
+            token = secrets.token_urlsafe(24)
+            game['players'][token] = dict(name=name, score=0)
+            return response(dict(code=game['code'], token=token))
+        if action == 'next':
+            if not secrets.compare_digest(token, game['host']):
+                return response({'error': 'Host access required.'}, 403)
+            if game['phase'] == 'question':
+                raise ValueError('Wait for the shared question timer to finish.')
+            elif game['phase'] in ('lobby', 'results'):
+                game['index'] += 1
+                game['submissions'] = {}
+                if game['index'] == len(game['quiz']['questions']):
+                    game['phase'] = 'finished'
+                else:
+                    game['phase'] = 'question'
+                    game['started'] = time.time()
+                    game['deadline'] = game['started'] + question(game)['seconds']
+            return response(state(game, token))
+        if action == 'answer':
+            if token not in game['players']:
+                return response({'error': 'Player access required.'}, 403)
+            if game['phase'] != 'question' or token in game['submissions'] or data.get('index') != game['index']:
+                raise ValueError('This question is closed or already answered.')
+            q = question(game)
+            answer = data.get('answer')
+            if q['type'] == 'text':
+                correct = isinstance(answer, str) and answer.strip().casefold() in [x.casefold() for x in q['answers']]
+            else:
+                if not isinstance(answer, list) or any(type(x) is not int for x in answer):
+                    raise ValueError('Select an answer.')
+                correct = sorted(set(answer)) == q['answers']
+            elapsed = max(0, time.time() - game['started'])
+            points = round(500 + 500 * max(0, 1 - elapsed / q['seconds'])) if correct else 0
+            game['submissions'][token] = dict(correct=correct, points=points, response_seconds=round(elapsed, 2))
+            return response({'accepted': True})
+        return response({'error': 'Not found'}, 404)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', default=8075, type=int)
     args = parser.parse_args()
     with connect():
@@ -278,6 +314,8 @@ if __name__ == '__main__':
     print(f'Admin screen: http://{browser_host}:{args.port}/admin', flush=True)
     print(f'Player screen: http://{browser_host}:{args.port}/play', flush=True)
     if args.host == '0.0.0.0':
-        print(f'Other devices: use this computer’s LAN IP instead of localhost (port {args.port}).', flush=True)
+        for address in lan_addresses():
+            print(f'Players on Wi-Fi: http://{address}:{args.port}/play', flush=True)
+        print('Share a Wi-Fi address with players, not localhost. Allow Python in your firewall.', flush=True)
     print(f'Socrate is running on {args.host}:{args.port}', flush=True)
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    QuizServer((args.host, args.port), Handler).serve_forever()

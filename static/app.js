@@ -21,7 +21,8 @@ function nav() {
   document.querySelector('.local').innerHTML = adminView ? '<a href="/play">PLAYER VIEW ↗</a>' : '<a href="/admin">ADMIN SIGN IN ↗</a>';
 }
 nav();
-let poll, draft, selected = [], lastKey = '', current, timerEnd = 0;
+let poll, draft, selected = [], lastKey = '', current, timerEnd = 0, pollVersion = 0;
+let playerAddress = location.origin + '/play';
 function updateTimer() {
   const timer = document.querySelector('#timer');
   if(!timer) return;
@@ -32,12 +33,18 @@ function updateTimer() {
 setInterval(updateTimer, 100);
 function notice(message) { const n = document.querySelector('#notice'); n.textContent = message; n.hidden = false; setTimeout(() => n.hidden = true, 5000); }
 async function api(path, data, method) {
-  const response = await fetch('/api/' + path, {method: method || (data === undefined ? 'GET' : 'POST'), headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
-  const result = await response.json(); if (!response.ok) throw Error(result.error || 'Request failed'); return result;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('/api/' + path, {signal:controller.signal, method: method || (data === undefined ? 'GET' : 'POST'), headers: {'Content-Type':'application/json', 'Authorization':session?.token || '', 'X-Admin-Token':adminView ? adminToken : ''}, body:data === undefined ? undefined : JSON.stringify(data)});
+    const result = await response.json();
+    if (!response.ok) { const error = Error(result.error || 'Request failed'); error.status = response.status; throw error; }
+    return result;
+  } finally { clearTimeout(timeout); }
 }
 function run(fn) { return async event => { try { await fn(event); } catch(e) { notice(e.message); } }; }
 function remember(s) { session = s; storage.setItem(sessionKey, JSON.stringify(s)); lastKey = ''; play(); }
-function leave() { clearTimeout(poll); session = null; storage.removeItem(sessionKey); home(); }
+function leave() { ++pollVersion; clearTimeout(poll); session = null; storage.removeItem(sessionKey); home(); }
 function joinForm() {
   return `<form class="card join" id="join"><span class="eyebrow">PLAYER VIEW</span><h2>Join the fun.</h2><p>Your host has a game code. You bring the answers.</p><label for="code">Game code</label><input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required><label for="name">Your nickname</label><input id="name" maxlength="30" placeholder="Curious mind" required><button>Join game →</button><p class="muted center">Connect to the same Wi-Fi as your host.</p></form>`;
 }
@@ -46,6 +53,7 @@ function login() {
   document.querySelector('#login').onsubmit = run(async e => { e.preventDefault(); const result = await api('admin/login', {key:document.querySelector('#key').value}); adminToken = result.token; storage.setItem('socrate-admin-token', adminToken); await home(); });
 }
 async function home() {
+  ++pollVersion;
   clearTimeout(poll);
   if(!adminView) {
     app.innerHTML = `<section class="hero"><div><span class="eyebrow">A LITTLE CURIOSITY GOES A LONG WAY</span><h1>Ready, set.<br>Get curious.</h1><p>Join your host’s game, put your knowledge to the test, and climb the leaderboard.</p><p class="muted">No account needed. Just a code and a curious mind.</p></div>${joinForm()}</section>`;
@@ -55,7 +63,7 @@ async function home() {
   if(!adminToken) return login();
   try { await api('admin/session'); } catch(e) { adminToken=''; storage.removeItem('socrate-admin-token'); login(); return; }
   app.innerHTML = `<section><span class="eyebrow">ADMIN STUDIO</span><h1>Good questions.<br>Great company.</h1><p>Create quizzes and host games. Share the player address with your audience.</p><div class="row"><button id="create">＋ Create a quiz</button><a class="button secondary" href="/play" target="_blank" rel="noopener">Open player view ↗</a><button id="logout" class="ghost">Sign out</button></div><p class="muted">Player address: <strong id="player-address"></strong></p></section><div class="section-title"><div><span class="eyebrow">ADMIN ONLY</span><h2>Your quiz collection</h2></div><span class="muted">Saved on this computer</span></div><section class="grid" id="quizzes">Loading your quizzes…</section>`;
-  document.querySelector('#player-address').textContent = location.origin + '/play';
+  document.querySelector('#player-address').textContent = playerAddress;
   document.querySelector('#create').onclick = () => editor();
   document.querySelector('#logout').onclick = run(async()=>{await api('admin/logout',{});adminToken='';storage.removeItem('socrate-admin-token');login();});
   try {
@@ -93,9 +101,14 @@ function renderEditor() {
 async function play() {
   clearTimeout(poll);
   if(!session) return;
+  const version = ++pollVersion;
+  const activeSession = session;
   try {
     const requestStarted = performance.now();
-    current = await api(`games/${session.code}`);
+    const snapshot = await api(`games/${session.code}`);
+    if(version !== pollVersion || session !== activeSession) return;
+    current = snapshot;
+    const connection = document.querySelector('#connection'); if(connection) connection.hidden = true;
     timerEnd = performance.now() + Math.max(0, (current.remaining || 0) * 1000 - (performance.now() - requestStarted) / 2);
     const g = current;
     const key = `${g.phase}-${g.index}-${g.submitted}`;
@@ -104,20 +117,34 @@ async function play() {
     const count=document.querySelector('#count'); if(count) count.textContent=`${g.answered} / ${g.players.length} answered`;
     const people=document.querySelector('#people'); if(people) people.innerHTML=g.players.map(p=>`<span class="chip">${esc(p.name)}</span>`).join('') || '<p>Waiting for your first player…</p>';
     poll=setTimeout(play,300);
-  } catch(e) { notice(e.message); app.innerHTML='<div class="card center"><h2>Game unavailable</h2><p>The server may have restarted. Return home and start or join a new game.</p><button id="exit">Return home</button></div>'; document.querySelector('#exit').onclick=leave; }
+  } catch(e) {
+    if(version !== pollVersion || session !== activeSession) return;
+    if(!e.status || e.status >= 500) {
+      const connection = document.querySelector('#connection');
+      if(connection) { connection.hidden = false; connection.textContent = 'Connection interrupted. Reconnecting… Your game session is saved.'; }
+      poll = setTimeout(play, 1000);
+      return;
+    }
+    notice(e.message); app.innerHTML='<div class="card center"><h2>Game unavailable</h2><p>The server may have restarted. Return home and start or join a new game.</p><button id="exit">Return home</button></div>'; document.querySelector('#exit').onclick=leave; }
 }
 function ranking(g) { return `<div class="card">${g.players.map((p,i)=>`<div class="score"><span>${i+1}. ${esc(p.name)}</span><strong>${p.score} pts</strong></div>`).join('')||'<p>No players joined.</p>'}</div>`; }
 function renderGame(g) {
   let body='';
-  if(g.phase==='lobby') body=`<span class="eyebrow">${esc(g.title)}</span><h1 style="margin-left:auto;margin-right:auto">The room is yours.</h1><p>Join on the same server address and enter this code:</p><div class="code">${g.code}</div><div class="players" id="people"></div>${g.host?'<button id="next">Start game →</button>':'<p>Get comfortable. Your host will start the game shortly.</p>'}`;
+  if(g.phase==='lobby') body=`<span class="eyebrow">${esc(g.title)}</span><h1 style="margin-left:auto;margin-right:auto">The room is yours.</h1><p>Join on the same server address and enter this code:</p>${g.host?`<p>Player address: <strong>${esc(playerAddress)}</strong></p>`:''}<div class="code">${g.code}</div><div class="players" id="people"></div>${g.host?'<button id="next">Start game →</button>':'<p>Get comfortable. Your host will start the game shortly.</p>'}`;
   if(g.phase==='question') body=`<div class="row" style="justify-content:space-between"><span class="eyebrow">QUESTION ${g.index+1} OF ${g.total}</span><span class="timer" id="timer"></span></div><h2>${esc(g.question.text)}</h2><p id="count"></p><p class="muted">Correct answers earn 500 points + up to 500 for speed. Incorrect or missed answers earn 0.</p>${g.host?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><p>Everyone has the same timer. Results appear when time is up.</p>`:g.submitted?`<div class="answers">${g.question.options.map(o=>`<div class="answer">${esc(o)}</div>`).join('')}</div><div class="card"><h2>Answer locked in ✓</h2><p>Waiting for the shared timer to finish…</p></div>`:`<form id="answer">${g.question.type==='text'?'<label for="written">Your answer</label><input id="written" maxlength="300" autocomplete="off" required>':`<p>${g.question.type==='multiple'?'Select all correct answers.':'Select one answer.'}</p><div class="answers">${g.question.options.map((o,i)=>`<button type="button" class="answer" data-answer="${i}" aria-pressed="false">${esc(o)}</button>`).join('')}</div>`}<button style="margin-top:16px">Lock in answer →</button></form>`}`;
   if(g.phase==='results') { const q=g.question; const correct=q.type==='text'?q.answers.join(' / '):q.answers.map(i=>q.options[i]).join(', '); body=`<span class="eyebrow">QUESTION ${g.index+1} · RESULTS</span><h2>${esc(q.text)}</h2><div class="card"><span class="eyebrow">CORRECT ANSWER${q.answers.length>1?'S':''}</span><h2>${esc(correct)}</h2>${g.host?'':`<p>${g.correct?'Correct!':'Incorrect or no answer.'} <strong>+${g.points} points</strong>${g.response_seconds == null ? '' : ` · Answered in ${g.response_seconds.toFixed(2)}s`}</p>`}</div><h2>Leaderboard</h2>${ranking(g)}${g.host?`<button style="margin-top:25px" id="next">${g.index+1===g.total?'Finish game':'Next question'} →</button>`:'<p>Waiting for your host…</p>'}`; }
   if(g.phase==='finished') body=`<span class="eyebrow">THAT’S A WRAP</span><h1 style="margin-left:auto;margin-right:auto">${g.players.length?esc(g.players[0].name)+' wins!':'Thanks for playing!'}</h1><p>Good company makes every answer count.</p>${ranking(g)}<button style="margin-top:25px" id="done">${adminView?'Back to collection':'Join another game'}</button>`;
-  app.innerHTML=`<section class="game center"><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><button class="ghost" id="exit">Leave game</button></div>${body}</section>`;
+  app.innerHTML=`<section class="game center"><p id="connection" role="status" class="card" hidden></p><div class="section-title"><span class="muted">${esc(g.title)} · ${g.code}</span><button class="ghost" id="exit">Leave game</button></div>${body}</section>`;
   document.querySelector('#exit').onclick=()=>{if(confirm('Leave this game?')) leave();};
   const next=document.querySelector('#next'); if(next) next.onclick=run(async()=>{next.disabled=true;try{await api(`games/${g.code}/next`,{});await play();}finally{next.disabled=false;}});
   const done=document.querySelector('#done'); if(done) done.onclick=leave;
   document.querySelectorAll('[data-answer]').forEach(b=>b.onclick=()=>{const i=Number(b.dataset.answer);selected=g.question.type==='multiple'?(selected.includes(i)?selected.filter(x=>x!==i):[...selected,i]):[i];document.querySelectorAll('[data-answer]').forEach(x=>{const active=selected.includes(Number(x.dataset.answer));x.classList.toggle('selected',active);x.setAttribute('aria-pressed',String(active));});});
   const form=document.querySelector('#answer'); if(form) form.onsubmit=run(async e=>{e.preventDefault();const answer=g.question.type==='text'?document.querySelector('#written').value:selected;if(g.question.type!=='text'&&!answer.length)throw Error('Choose an answer first.');await api(`games/${g.code}/answer`,{index:g.index,answer});await play();});
 }
-if(session) play(); else home();
+async function boot() {
+  if(adminView && ['localhost', '127.0.0.1', '0.0.0.0'].includes(location.hostname)) {
+    try { const info = await api('server-info'); playerAddress = info.player_urls[0] || playerAddress; } catch {}
+  }
+  if(session) play(); else home();
+}
+boot();

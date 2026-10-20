@@ -1,4 +1,5 @@
 import http.client
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import subprocess
@@ -22,7 +23,7 @@ class GameTest(unittest.TestCase):
         app.ADMIN_KEY = 'test-admin-key'
         cls.admin_token = 'test-admin-session'
         app.ADMIN_SESSIONS[cls.admin_token] = app.time.time() + 3600
-        cls.server = ThreadingHTTPServer(('127.0.0.1', 0), app.Handler)
+        cls.server = app.QuizServer(('127.0.0.1', 0), app.Handler)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
     @classmethod
@@ -32,7 +33,7 @@ class GameTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def request(self, path, data=None, token='', status=200, admin=True, method=None):
-        conn = http.client.HTTPConnection(*self.server.server_address)
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=5)
         conn.request(method or ('GET' if data is None else 'POST'), path,
                      None if data is None else json.dumps(data),
                      {'Authorization': token, 'Content-Type': 'application/json',
@@ -79,7 +80,7 @@ class GameTest(unittest.TestCase):
 
     def test_screen_routes_and_assets_are_not_cached(self):
         for path in ('/', '/admin', '/admin/', '/play', '/play/', '/app.js', '/style.css'):
-            conn = http.client.HTTPConnection(*self.server.server_address)
+            conn = http.client.HTTPConnection(*self.server.server_address, timeout=5)
             conn.request('GET', path)
             response = conn.getresponse()
             body = response.read()
@@ -94,7 +95,7 @@ class GameTest(unittest.TestCase):
         self.request('/api/games', {'quiz_id': 'anything'}, admin=False, status=403)
         self.request('/api/admin/login', {'key': 'wrong'}, admin=False, status=403)
         login = self.request('/api/admin/login', {'key': 'test-admin-key'}, admin=False)
-        conn = http.client.HTTPConnection(*self.server.server_address)
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=5)
         headers = {'X-Admin-Token': login['token'], 'Content-Type': 'application/json'}
         conn.request('GET', '/api/quizzes', headers=headers)
         response = conn.getresponse()
@@ -166,6 +167,40 @@ class GameTest(unittest.TestCase):
         state = self.request(base, token=player['token'], admin=False)
         self.assertEqual(state['question']['text'], 'True?')
         self.request(base + '/answer', {'index': 0, 'answer': [0]}, player['token'], admin=False)
+
+    def test_thirty_two_players_join_and_answer_simultaneously(self):
+        quiz = self.request('/api/quizzes', dict(title='Classroom', questions=[dict(type='boolean', text='True?', seconds=120, answers=[0])]), status=201)
+        host = self.request('/api/games', {'quiz_id': quiz['id']}, status=201)
+        base = '/api/games/' + host['code']
+        count = 32
+        barrier = threading.Barrier(count)
+
+        def join(index):
+            barrier.wait(timeout=5)
+            return self.request(base + '/join', {'name': f'Player {index}'}, admin=False)
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            players = list(pool.map(join, range(count)))
+        self.assertEqual(len({p['token'] for p in players}), count)
+        self.assertEqual(len(self.request(base, token=host['token'])['players']), count)
+        self.request(base + '/next', {}, host['token'])
+        barrier = threading.Barrier(count)
+
+        def answer(player):
+            barrier.wait(timeout=5)
+            state = self.request(base, token=player['token'], admin=False)
+            self.assertEqual(state['index'], 0)
+            return self.request(base + '/answer', {'index': 0, 'answer': [0]}, player['token'], admin=False)
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            self.assertTrue(all(r['accepted'] for r in pool.map(answer, players)))
+        with app.LOCK:
+            self.assertEqual(len(app.GAMES[host['code']]['submissions']), count)
+            app.GAMES[host['code']]['deadline'] = 0
+        results = self.request(base, token=host['token'])
+        self.assertEqual(results['phase'], 'results')
+        self.assertEqual(len(results['players']), count)
+        self.assertTrue(all(p['score'] > 500 for p in results['players']))
 
     def test_shared_timer_and_speed_scoring(self):
         q = self.request('/api/quizzes', dict(title='Shared clock', questions=[dict(type='boolean', text='True?', seconds=20, answers=[0])]), status=201)

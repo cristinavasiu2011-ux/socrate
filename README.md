@@ -22,6 +22,8 @@ For other devices on your Wi-Fi:
 python app.py --host 0.0.0.0 --port 8075
 ```
 
+The default host is `0.0.0.0`, so `python app.py` also accepts Wi-Fi players. Use `--host 127.0.0.1` for access only on this computer. The terminal prints available Wi-Fi player URLs. Share one of those with every player; `localhost` points to each player’s own device. Players need different nicknames and must join before the host starts the game.
+
 Players open `http://YOUR-COMPUTER-LAN-IP:8075/play`. Admins use `/admin`. Allow inbound TCP port 8075 in your computer's firewall if necessary. Internet access is unnecessary. Stop the server with Ctrl+C.
 
 ## Features
@@ -31,6 +33,7 @@ Players open `http://YOUR-COMPUTER-LAN-IP:8075/play`. Admins use `/admin`. Allow
 - Local quiz collection, with duplicate-and-edit for creating variations.
 - Admins can delete quizzes from the collection after confirming. Deletion is permanent; games already running keep their quiz and continue normally.
 - Game lobby, unique nicknames, timed answers, answer reveal, and final leaderboard.
+- Simultaneous player connections, independent tab sessions, and automatic recovery after brief network interruptions. The admin lobby displays a LAN player URL when available.
 - Correct answers earn `round(500 + 500 × (1 − response time / question duration))` points (500–1,000); incorrect and missed answers earn zero. Response time is measured when the server receives the answer. Multiple-answer questions require the exact set.
 - The host starts each question for everyone together. A shared server timer closes answers and reveals results when time runs out, even if everyone answered early. The host then starts the next question.
 - A smooth countdown follows the server timer; each device refreshes game state every 300 ms. Results show each player’s response time and points. Scores stay hidden until the timer ends.
